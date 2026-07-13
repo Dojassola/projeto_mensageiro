@@ -28,10 +28,14 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -54,6 +58,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Switch
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.DisposableEffect
@@ -210,79 +215,86 @@ fun MensageiroApp(incomingMessage: String? = null, onMessageConsumed: () -> Unit
         }
     }
 
+    fun openContact(contact: VerifiedContact) {
+        selectedPeerId = contact.peerId
+        MessagingRuntime.selectContact(context, contact.peerId)
+        screen = Screen.Conversation
+    }
+
+    fun renameContact(peerId: String, name: String) {
+        contactStatus = runCatching { contactStore.rename(peerId, name) }
+            .fold({ "Contato renomeado." }, { "Falha: ${it.message}" })
+        contacts = contactStore.all()
+    }
+
     BackHandler(enabled = screen != Screen.Contacts) { screen = Screen.Contacts }
 
-    Scaffold(
-        modifier = Modifier.fillMaxSize(),
-        topBar = {
-            if (screen != Screen.Conversation) Column(
-                Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).statusBarsPadding()
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    if (screen == Screen.Contacts) {
-                        Text("Mensageiro", style = MaterialTheme.typography.titleLarge)
-                        Spacer(Modifier.weight(1f))
-                        TextButton(onClick = { screen = Screen.AddContact }) { Text("+ Contato") }
-                        TextButton(onClick = { screen = Screen.Profile }) { Text("Perfil") }
-                    } else {
-                        TextButton(onClick = { screen = Screen.Contacts }) { Text("<") }
-                        Text(screen.title, style = MaterialTheme.typography.titleLarge)
-                        Spacer(Modifier.weight(1f))
-                        if (screen == Screen.AddContact) {
-                            TextButton(onClick = { screen = Screen.Profile }) { Text("Perfil") }
-                        }
-                    }
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val expanded = maxWidth >= 840.dp
+        Scaffold(
+            modifier = Modifier.fillMaxSize(),
+            topBar = {
+                if (screen != Screen.Conversation || expanded) {
+                    AppTopBar(
+                        screen = screen,
+                        expanded = expanded,
+                        onContacts = { screen = Screen.Contacts },
+                        onAddContact = { screen = Screen.AddContact },
+                        onProfile = { screen = Screen.Profile }
+                    )
                 }
-                HorizontalDivider()
             }
-        }
-    ) { innerPadding ->
-        when (screen) {
-            Screen.Contacts -> ContactsScreen(
-                contacts = contacts,
-                modifier = Modifier.padding(innerPadding),
-                onOpen = {
-                    selectedPeerId = it.peerId
-                    MessagingRuntime.selectContact(context, it.peerId)
-                    screen = Screen.Conversation
-                },
-                onRename = { peerId, name ->
-                    contactStatus = runCatching { contactStore.rename(peerId, name) }
-                        .fold({ "Contato renomeado." }, { "Falha: ${it.message}" })
-                    contacts = contactStore.all()
-                }
-            )
-            Screen.AddContact -> AddContactScreen(identity, contactStatus, ::importContact, Modifier.padding(innerPadding))
-            Screen.Conversation -> ConversationScreen(
-                contact = contacts.firstOrNull { it.peerId == selectedPeerId },
-                modifier = Modifier.padding(innerPadding),
-                onBack = { screen = Screen.Contacts }
-            )
-            Screen.Profile -> ProfileScreen(
-                identity = identity,
-                modifier = Modifier.padding(innerPadding),
-                versionName = AppUpdater.versionName(context),
-                checkingUpdate = checkingUpdate,
-                updateStatus = updateCheckStatus,
-                onCheckUpdate = ::checkUpdatesNow,
-                onSave = { name ->
-                    runCatching { identityStore.rename(name) }
-                        .onSuccess {
-                            identity = it
-                            screen = Screen.Contacts
-                        }.exceptionOrNull()?.message.orEmpty()
-                },
-                onRestored = {
-                    identity = identityStore.getOrCreate()
-                    contacts = contactStore.all()
-                    selectedPeerId = contacts.firstOrNull()?.peerId
-                    MessagingRuntime.reload(context)
-                    screen = Screen.Contacts
-                }
-            )
+        ) { innerPadding ->
+            if (expanded && (screen == Screen.Contacts || screen == Screen.Conversation)) {
+                ExpandedConversationLayout(
+                    contacts = contacts,
+                    selectedPeerId = selectedPeerId.takeIf { screen == Screen.Conversation },
+                    modifier = Modifier.padding(innerPadding),
+                    onOpen = ::openContact,
+                    onRename = ::renameContact,
+                    onBack = { screen = Screen.Contacts }
+                )
+            } else when (screen) {
+                Screen.Contacts -> ContactsScreen(
+                    contacts = contacts,
+                    modifier = Modifier.padding(innerPadding),
+                    onOpen = ::openContact,
+                    onRename = ::renameContact
+                )
+                Screen.AddContact -> AddContactScreen(
+                    identity,
+                    contactStatus,
+                    ::importContact,
+                    Modifier.padding(innerPadding)
+                )
+                Screen.Conversation -> ConversationScreen(
+                    contact = contacts.firstOrNull { it.peerId == selectedPeerId },
+                    modifier = Modifier.padding(innerPadding),
+                    onBack = { screen = Screen.Contacts }
+                )
+                Screen.Profile -> ProfileScreen(
+                    identity = identity,
+                    modifier = Modifier.padding(innerPadding),
+                    versionName = AppUpdater.versionName(context),
+                    checkingUpdate = checkingUpdate,
+                    updateStatus = updateCheckStatus,
+                    onCheckUpdate = ::checkUpdatesNow,
+                    onSave = { name ->
+                        runCatching { identityStore.rename(name) }
+                            .onSuccess {
+                                identity = it
+                                screen = Screen.Contacts
+                            }.exceptionOrNull()?.message.orEmpty()
+                    },
+                    onRestored = {
+                        identity = identityStore.getOrCreate()
+                        contacts = contactStore.all()
+                        selectedPeerId = contacts.firstOrNull()?.peerId
+                        MessagingRuntime.reload(context)
+                        screen = Screen.Contacts
+                    }
+                )
+            }
         }
     }
 
@@ -357,9 +369,90 @@ fun MensageiroApp(incomingMessage: String? = null, onMessageConsumed: () -> Unit
 }
 
 @Composable
+private fun AppTopBar(
+    screen: Screen,
+    expanded: Boolean,
+    onContacts: () -> Unit,
+    onAddContact: () -> Unit,
+    onProfile: () -> Unit
+) {
+    Column(
+        Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).statusBarsPadding()
+    ) {
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val narrow = maxWidth < 360.dp
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (screen == Screen.Contacts || (expanded && screen == Screen.Conversation)) {
+                    Text("Mensageiro", style = MaterialTheme.typography.titleLarge)
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = onAddContact) { Text(if (narrow) "+" else "+ Contato") }
+                    TextButton(onClick = onProfile) { Text(if (narrow) "Eu" else "Perfil") }
+                } else {
+                    TextButton(
+                        onClick = onContacts,
+                        modifier = Modifier.size(48.dp),
+                        contentPadding = PaddingValues(0.dp)
+                    ) { Text("<") }
+                    Text(screen.title, style = MaterialTheme.typography.titleLarge)
+                    Spacer(Modifier.weight(1f))
+                    if (screen == Screen.AddContact) {
+                        TextButton(onClick = onProfile) { Text(if (narrow) "Eu" else "Perfil") }
+                    }
+                }
+            }
+        }
+        HorizontalDivider()
+    }
+}
+
+@Composable
+private fun ExpandedConversationLayout(
+    contacts: List<VerifiedContact>,
+    selectedPeerId: String?,
+    modifier: Modifier,
+    onOpen: (VerifiedContact) -> Unit,
+    onRename: (String, String) -> Unit,
+    onBack: () -> Unit
+) {
+    Box(modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+        Row(Modifier.fillMaxHeight().widthIn(max = 1_280.dp).fillMaxWidth()) {
+            ContactsScreen(
+                contacts = contacts,
+                modifier = Modifier.fillMaxHeight().width(360.dp),
+                selectedPeerId = selectedPeerId,
+                onOpen = onOpen,
+                onRename = onRename
+            )
+            VerticalDivider(Modifier.fillMaxHeight())
+            val contact = contacts.firstOrNull { it.peerId == selectedPeerId }
+            if (contact == null) {
+                Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                    Text(
+                        "Selecione uma conversa",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else {
+                ConversationScreen(
+                    contact = contact,
+                    modifier = Modifier.weight(1f),
+                    onBack = onBack,
+                    showBack = false,
+                    useStatusBarPadding = false
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun ContactsScreen(
     contacts: List<VerifiedContact>,
     modifier: Modifier,
+    selectedPeerId: String? = null,
     onOpen: (VerifiedContact) -> Unit,
     onRename: (String, String) -> Unit
 ) {
@@ -391,7 +484,13 @@ private fun ContactsScreen(
             items(contacts, key = { it.peerId }) { contact ->
                 val preview = previews[contact.peerId] ?: ContactPreview(null, 0, false)
                 Row(
-                    modifier = Modifier.fillMaxWidth().clickable { onOpen(contact) }.padding(vertical = 12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                        .background(
+                            if (contact.peerId == selectedPeerId) MaterialTheme.colorScheme.secondaryContainer
+                            else MaterialTheme.colorScheme.surface
+                        )
+                        .clickable { onOpen(contact) }
+                        .padding(vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     ProfileAvatar(
@@ -402,10 +501,17 @@ private fun ContactsScreen(
                     Spacer(Modifier.size(12.dp))
                     Column(Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(contact.displayName, style = MaterialTheme.typography.titleMedium)
-                            Spacer(Modifier.weight(1f))
+                            Text(
+                                contact.displayName,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                            Spacer(Modifier.size(8.dp))
                             Text(
                                 contactPresence(preview, clock),
+                                maxLines = 1,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = if (preview.active) MaterialTheme.colorScheme.primary
                                 else MaterialTheme.colorScheme.onSurfaceVariant
@@ -420,10 +526,14 @@ private fun ContactsScreen(
                             style = MaterialTheme.typography.bodyMedium
                         )
                     }
-                    TextButton(onClick = {
-                        renaming = contact
-                        name = contact.displayName
-                    }) { Text("...") }
+                    TextButton(
+                        onClick = {
+                            renaming = contact
+                            name = contact.displayName
+                        },
+                        modifier = Modifier.size(48.dp),
+                        contentPadding = PaddingValues(0.dp)
+                    ) { Text("...") }
                 }
                 HorizontalDivider()
             }
@@ -481,7 +591,10 @@ private fun AddContactScreen(
         Image(
             bitmap = qrCode.asImageBitmap(),
             contentDescription = "QR Code do meu contato",
-            modifier = Modifier.size(280.dp)
+            modifier = Modifier.align(Alignment.CenterHorizontally)
+                .widthIn(max = 280.dp)
+                .fillMaxWidth()
+                .aspectRatio(1f)
         )
         Spacer(Modifier.height(20.dp))
         Button(
@@ -795,7 +908,9 @@ private fun qrCode(text: String): Bitmap {
 private fun ConversationScreen(
     contact: VerifiedContact?,
     modifier: Modifier,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    showBack: Boolean = true,
+    useStatusBarPadding: Boolean = true
 ) {
     val context = LocalContext.current
     val attachmentStore = remember { AttachmentStore(context) }
@@ -846,16 +961,28 @@ private fun ConversationScreen(
 
     Column(modifier = modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
         if (contact == null) {
-            TextButton(onClick = onBack, modifier = Modifier.statusBarsPadding()) { Text("< Voltar") }
+            TextButton(
+                onClick = onBack,
+                modifier = if (useStatusBarPadding) Modifier.statusBarsPadding() else Modifier
+            ) { Text("< Voltar") }
             return@Column
         }
 
-        Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).statusBarsPadding()) {
+        val headerModifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).let {
+            if (useStatusBarPadding) it.statusBarsPadding() else it
+        }
+        Column(headerModifier) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp)
             ) {
-                TextButton(onClick = onBack) { Text("<") }
+                if (showBack) {
+                    TextButton(
+                        onClick = onBack,
+                        modifier = Modifier.size(48.dp),
+                        contentPadding = PaddingValues(0.dp)
+                    ) { Text("<") }
+                }
                 ProfileAvatar(
                     profilePhotos.remote(contact.peerId),
                     contact.displayName,
@@ -888,83 +1015,86 @@ private fun ConversationScreen(
             }
             HorizontalDivider()
         }
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            itemsIndexed(messages, key = { _, message -> message.id }) { index, message ->
-                Column(Modifier.fillMaxWidth()) {
-                    if (index == 0 || !sameDay(messages[index - 1].timestamp, message.timestamp)) {
-                        Text(
-                            messageDate(context, message.timestamp),
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
-                            textAlign = TextAlign.Center,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    if (message.system) {
-                        Text(
-                            message.text,
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                            textAlign = TextAlign.Center,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    } else {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = if (message.mine) Arrangement.End else Arrangement.Start
-                        ) {
-                            Card(
-                                Modifier.widthIn(min = 72.dp, max = 320.dp).combinedClickable(
-                                    onClick = {},
-                                    onLongClick = { deleting = message }
-                                )
+        BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+            val bubbleWidth = minOf(560.dp, maxWidth * 0.84f)
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize().padding(horizontal = if (maxWidth < 360.dp) 8.dp else 12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                itemsIndexed(messages, key = { _, message -> message.id }) { index, message ->
+                    Column(Modifier.fillMaxWidth()) {
+                        if (index == 0 || !sameDay(messages[index - 1].timestamp, message.timestamp)) {
+                                            Text(
+                                messageDate(context, message.timestamp),
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                                textAlign = TextAlign.Center,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        if (message.system) {
+                            Text(
+                                message.text,
+                                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                textAlign = TextAlign.Center,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = if (message.mine) Arrangement.End else Arrangement.Start
                             ) {
-                                Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                                    val attachment = message.attachment
-                                    if (attachment == null) {
-                                        Text(message.text)
-                                    } else {
-                                        AttachmentPreview(attachment)
-                                        Text(attachment.name, style = MaterialTheme.typography.titleSmall)
-                                        Text(
-                                            android.text.format.Formatter.formatShortFileSize(context, attachment.size),
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                        if (attachment.complete) {
-                                            TextButton(onClick = {
-                                                fileStatus = openAttachment(context, attachmentStore, attachment)
-                                            }) { Text("Abrir") }
+                                Card(
+                                    Modifier.widthIn(min = 72.dp, max = bubbleWidth).combinedClickable(
+                                        onClick = {},
+                                        onLongClick = { deleting = message }
+                                    )
+                                ) {
+                                    Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                                        val attachment = message.attachment
+                                        if (attachment == null) {
+                                            Text(message.text)
                                         } else {
+                                            AttachmentPreview(attachment)
+                                            Text(attachment.name, style = MaterialTheme.typography.titleSmall)
                                             Text(
-                                                if (message.mine) "Arquivo indisponivel" else "Recebendo...",
+                                                android.text.format.Formatter.formatShortFileSize(context, attachment.size),
                                                 style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.primary
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
+                                            if (attachment.complete) {
+                                                TextButton(onClick = {
+                                                    fileStatus = openAttachment(context, attachmentStore, attachment)
+                                                }) { Text("Abrir") }
+                                            } else {
+                                                Text(
+                                                    if (message.mine) "Arquivo indisponivel" else "Recebendo...",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
                                         }
-                                    }
-                                    Row(
-                                        modifier = Modifier.align(Alignment.End).padding(top = 3.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            messageTime(context, message.timestamp),
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                        if (message.mine) {
-                                            Spacer(Modifier.size(6.dp))
+                                        Row(
+                                            modifier = Modifier.align(Alignment.End).padding(top = 3.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
                                             Text(
-                                                messageStatus(message.status),
+                                                messageTime(context, message.timestamp),
                                                 style = MaterialTheme.typography.labelSmall,
-                                                color = if (message.status == MessageStatus.PENDING) {
-                                                    MaterialTheme.colorScheme.primary
-                                                } else MaterialTheme.colorScheme.onSurfaceVariant
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
+                                            if (message.mine) {
+                                                Spacer(Modifier.size(6.dp))
+                                                Text(
+                                                    messageStatus(message.status),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = if (message.status == MessageStatus.PENDING) {
+                                                        MaterialTheme.colorScheme.primary
+                                                    } else MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -982,27 +1112,38 @@ private fun ConversationScreen(
                 style = MaterialTheme.typography.bodySmall
             )
         }
-        Row(
+        BoxWithConstraints(
             modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)
-                .padding(horizontal = 10.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
         ) {
-            TextButton(onClick = { chooseFile.launch(arrayOf("*/*")) }) { Text("+") }
-            OutlinedTextField(
-                value = text,
-                onValueChange = { text = it },
-                modifier = Modifier.weight(1f),
-                placeholder = { Text("Mensagem") },
-                maxLines = 4
-            )
-            Spacer(Modifier.size(8.dp))
-            Button(
-                onClick = {
-                    MessagingRuntime.send(text)
-                    text = ""
-                },
-                enabled = text.isNotBlank()
-            ) { Text("Enviar") }
+            val compactComposer = maxWidth < 360.dp
+            Row(
+                modifier = Modifier.fillMaxWidth()
+                    .padding(horizontal = if (compactComposer) 6.dp else 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(
+                    onClick = { chooseFile.launch(arrayOf("*/*")) },
+                    modifier = Modifier.size(48.dp),
+                    contentPadding = PaddingValues(0.dp)
+                ) { Text("+") }
+                Spacer(Modifier.size(if (compactComposer) 4.dp else 8.dp))
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    modifier = Modifier.weight(1f).widthIn(min = 0.dp),
+                    placeholder = { Text("Mensagem") },
+                    maxLines = 4
+                )
+                Spacer(Modifier.size(if (compactComposer) 4.dp else 8.dp))
+                Button(
+                    onClick = {
+                        MessagingRuntime.send(text)
+                        text = ""
+                    },
+                    enabled = text.isNotBlank(),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                ) { Text("Enviar") }
+            }
         }
     }
 
@@ -1032,7 +1173,8 @@ private fun AttachmentPreview(attachment: com.mensageiro.core.crypto.StoredAttac
         Image(
             bitmap = it.asImageBitmap(),
             contentDescription = attachment.name,
-            modifier = Modifier.width(280.dp).height(180.dp).padding(bottom = 8.dp),
+            modifier = Modifier.widthIn(max = 420.dp).fillMaxWidth().aspectRatio(16f / 10f)
+                .padding(bottom = 8.dp),
             contentScale = ContentScale.Crop
         )
     }
@@ -1127,15 +1269,18 @@ private fun ScreenColumn(
     horizontalAlignment: Alignment.Horizontal = Alignment.Start,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(24.dp),
-        verticalArrangement = verticalArrangement,
-        horizontalAlignment = horizontalAlignment,
-        content = content
-    )
+    BoxWithConstraints(modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+        Column(
+            modifier = Modifier.fillMaxHeight()
+                .widthIn(max = 720.dp)
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = if (maxWidth < 360.dp) 16.dp else 24.dp, vertical = 24.dp),
+            verticalArrangement = verticalArrangement,
+            horizontalAlignment = horizontalAlignment,
+            content = content
+        )
+    }
 }
 
 private enum class Screen(val title: String) {
@@ -1145,7 +1290,8 @@ private enum class Screen(val title: String) {
     Profile("Perfil")
 }
 
-@Preview(showBackground = true)
+@Preview(name = "Compacta", showBackground = true, widthDp = 320, heightDp = 640)
+@Preview(name = "Expandida", showBackground = true, widthDp = 1_000, heightDp = 700)
 @Composable
 fun MensageiroAppPreview() {
     MensageiroTheme {
