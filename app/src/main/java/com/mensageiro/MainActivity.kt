@@ -711,7 +711,10 @@ private fun ProfileScreen(
             },
             enabled = automaticStatus.enabled || password.length >= 6
         ) {
-            Text(if (automaticStatus.enabled) "Desativar automatico" else "Escolher destino automatico")
+            Text(
+                if (automaticStatus.enabled) "Desativar automatico"
+                else "Escolher Google Drive ou arquivo"
+            )
         }
         if (automaticStatus.enabled) {
             Spacer(Modifier.height(8.dp))
@@ -720,7 +723,7 @@ private fun ProfileScreen(
             Button(
                 onClick = { automaticBackup.launch("mensageiro-automatico.json") },
                 enabled = password.length >= 6
-            ) { Text("Alterar destino") }
+            ) { Text("Alterar Drive ou arquivo") }
             Spacer(Modifier.height(8.dp))
             Button(onClick = {
                 AutomaticBackup.runNow(context)

@@ -23,34 +23,25 @@
 
 ## 3. Backup no Google Drive
 
-- Reutilizar exatamente o backup atual criptografado por senha.
-- Salvar no `appDataFolder` do Drive, sem acesso aos demais arquivos do usuario.
-- Executar com WorkManager no maximo uma vez por dia e oferecer "Fazer backup agora".
-- Nunca iniciar upload por mensagem, confirmacao de leitura ou mudanca de tela.
-- Manter backup local e Drive como destinos alternativos do mesmo formato.
-- Requer configurar OAuth no Google Cloud com o package `com.mensageiro` e o certificado definitivo de release.
+- Implementado pelo seletor de arquivos do Android, sem OAuth ou acesso geral ao Drive.
+- O usuario escolhe um documento no Google Drive e o app mantem permissao para sobrescreve-lo.
+- O conteudo usa o mesmo formato criptografado por senha do backup manual.
+- O automatico roda apos alteracoes, respeitando intervalo minimo de 6 horas, e oferece "Fazer backup agora".
+- A tela mostra destino, ultimo backup, proximo backup, falha e alteracao de destino.
+- Depois de reinstalar, basta restaurar o arquivo e escolher novamente o destino automatico.
 
 ## 4. Atualizacoes pelo GitHub
 
 - Repositorio: `https://github.com/Dojassola/projeto_mensageiro`.
 - O app consulta a ultima GitHub Release uma vez por dia ou imediatamente pelo botao "Verificar agora", baixa pelo `DownloadManager` e valida o SHA-256 do asset.
 - O Android valida a assinatura do APK e exige confirmacao da pessoa para instalar.
-- `.github/workflows/release.yml` publica `Mensageiro.apk` ao receber uma tag igual a versao, por exemplo `v0.17.0`.
-- Commits comuns nao publicam versoes. A publicacao acontece com `git tag v0.17.0` e `git push origin v0.17.0`.
+- `.github/workflows/release.yml` publica `Mensageiro.apk` ao receber uma tag igual a versao, por exemplo `v0.17.1`.
+- Commits comuns nao publicam versoes. A publicacao acontece com `git tag v0.17.1` e `git push origin v0.17.1`.
 - Para manter os dados instalados, o Secret `ANDROID_KEYSTORE_BASE64` deve conter `%USERPROFILE%\.android\debug.keystore` em Base64.
-- A chave continua fora do repositorio. A 0.16 foi a ultima versao enviada manualmente aos dois aparelhos.
-
-## Backup no Drive sem OAuth
-
-- O seletor de arquivos do Android ja oferece Google Drive como destino quando o aplicativo Drive esta instalado.
-- O automatico mantem permissao sobre o documento escolhido e sobrescreve esse mesmo backup criptografado.
-- A tela mostra o provedor, ultimo backup, proximo backup, alteracao de destino e execucao imediata.
-- Depois de reinstalar, basta restaurar o arquivo do Drive e escolher novamente o destino automatico.
+- A chave continua fora do repositorio. A 0.17.1 sera o primeiro teste de atualizacao nos dois aparelhos.
 
 ## Ordem
 
-1. Confirmar desempenho do cache, sync incremental e backup de 6 horas.
-2. Implementar mensagens de arquivo e retomada.
-3. Implementar perfis/fotos sobre o protocolo de arquivos.
-4. Adicionar o Secret da assinatura e publicar a primeira release.
-5. Configurar OAuth e integrar backup diario no Google Drive.
+1. Validar o backup de 6 horas no Google Drive nos dois aparelhos.
+2. Confirmar a atualizacao da 0.17.0 para a 0.17.1 pelo proprio aplicativo.
+3. Planejar o proximo conjunto de recursos depois desses dois testes.
