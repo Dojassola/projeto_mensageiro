@@ -1,0 +1,67 @@
+# Android e Gradle
+.gradle/
+**/build/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.hprof
+*.log
+
+# Configuracoes locais da IDE e do sistema
+.idea/
+.vscode/
+.agents/
+.codex/
+.kotlin/
+*.iml
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+
+# Assinatura e chaves privadas
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+*.pk8
+keystore.properties
+key.properties
+signing.properties
+id_rsa
+id_ed25519
+
+# Segredos e credenciais locais
+.env
+.env.*
+*.env
+!.env.example
+secrets/
+secrets.properties
+secret.properties
+*.secret
+*.credentials
+credentials.json
+credentials-*.json
+service-account*.json
+firebase-adminsdk*.json
+google-services.json
+.firebase/
+supabase/.temp/
+
+# Dados locais e backups do aplicativo
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.bak
+*.backup
+mensageiro-backup*

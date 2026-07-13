@@ -1,0 +1,1149 @@
+PLANO DO PROTÓTIPO INICIAL — MENSAGEIRO P2P ANDROID
+
+OBJETIVO
+
+Criar um aplicativo Android simples e funcional para troca de mensagens privadas entre duas pessoas.
+
+O protótipo deve permitir que eu instale o aplicativo no meu celular e no celular da minha namorada, adicione o aparelho dela como contato, estabeleça uma conexão P2P usando WebRTC e envie mensagens de texto diretamente entre os aparelhos.
+
+O protótipo não terá:
+
+Grupos
+
+Salas públicas
+
+Cadastro
+
+Login
+
+Senha
+
+Username global
+
+Lista pública de usuários
+
+Servidor de mensagens
+
+Backup em nuvem
+
+Chamadas
+
+Imagens
+
+Áudios
+
+Vídeos
+
+Múltiplos dispositivos por pessoa
+
+O protótipo terá:
+
+Identidade criptográfica criada localmente
+
+Peer ID permanente
+
+Adição de contato por QR Code ou convite
+
+Verificação criptográfica do contato
+
+Conexão WebRTC entre dois aparelhos
+
+Envio e recebimento de mensagens de texto
+
+Criptografia ponta a ponta adicional
+
+Banco local criptografado
+
+Fila local de mensagens pendentes
+
+Confirmação de envio e recebimento
+
+Reconexão automática
+
+Sincronização das mensagens entre os dois aparelhos
+
+Proteção contra alguém se passar por um contato conhecido
+
+ARQUITETURA PRINCIPAL
+
+Primeira abertura -> criar identidade criptográfica local -> gerar Peer ID -> proteger chave privada no Android Keystore -> criar banco local criptografado -> mostrar tela principal
+
+Adicionar contato -> trocar chaves públicas por QR Code -> confirmar fingerprint -> salvar contato localmente -> contato passa a ser confiável
+
+Abrir conversa -> localizar aparelho do contato -> trocar sinalização WebRTC -> estabelecer conexão P2P -> autenticar ambos os peers -> abrir DataChannel -> sincronizar diferenças -> enviar mensagens
+
+Mensagem escrita -> salvar localmente como pendente -> criptografar -> assinar -> enviar pelo WebRTC -> destinatário verificar assinatura -> descriptografar -> salvar localmente -> confirmar recebimento
+
+O servidor mínimo será utilizado apenas assim:
+
+Peer publica sinalização temporária -> outro peer recebe sinalização -> WebRTC conecta -> sinalização expira ou é apagada -> conversa continua diretamente entre os aparelhos
+
+O servidor nunca deve armazenar:
+
+Contas
+
+Logins
+
+Senhas
+
+Contatos
+
+Histórico
+
+Mensagens
+
+Mídias
+
+Chaves privadas
+
+Banco dos usuários
+
+IDENTIDADE LOCAL
+
+Cada instalação deve criar uma identidade criptográfica.
+
+Primeira abertura -> gerar chave privada de identidade -> gerar chave pública correspondente -> derivar Peer ID da chave pública -> guardar chave privada protegida -> apresentar Peer ID ao usuário
+
+A identidade real não será o nome mostrado na interface.
+
+Nome exibido -> apenas um apelido local
+
+Peer ID -> identidade criptográfica real
+
+Chave pública -> permite verificar assinaturas da identidade
+
+Chave privada -> prova que o aparelho controla aquela identidade
+
+Exemplo:
+
+Nome local: Ana
+
+Peer ID: hash da chave pública de Ana
+
+Chave pública: compartilhada com contatos
+
+Chave privada: nunca sai do aparelho
+
+O Peer ID deve ser derivado criptograficamente da chave pública, seguindo o conceito de identidade autocertificável usado pelo libp2p. Um Peer ID derivado da chave pública permite vincular o identificador à identidade criptográfica correspondente.
+
+CHAVES DO PROTÓTIPO
+
+Usar duas funções criptográficas separadas.
+
+Ed25519 -> assinatura e comprovação de identidade
+
+X25519 -> acordo de chaves entre os dois contatos
+
+XChaCha20-Poly1305 ou AES-256-GCM -> criptografia das mensagens
+
+Cada usuário deve possuir:
+
+IdentityPrivateKey
+
+IdentityPublicKey
+
+PeerID
+
+DatabaseKey
+
+Cada conversa deve possuir:
+
+ContactPublicKey
+
+ConversationID
+
+SessionKey
+
+Fingerprint
+
+Estado de confiança
+
+As assinaturas devem ser implementadas por uma biblioteca criptográfica reconhecida, como libsodium. As assinaturas de chave pública permitem que o destinatário verifique que determinado conteúdo foi assinado pelo detentor da chave privada correspondente.
+
+ARMAZENAMENTO DAS CHAVES
+
+Não salvar a chave privada diretamente em SharedPreferences, código-fonte ou banco em texto puro.
+
+Primeira abertura -> Android Keystore gera chave de proteção -> chave de proteção permanece não exportável quando suportado -> chave de identidade é criptografada -> conteúdo criptografado é armazenado localmente
+
+Android Keystore -> protege Key Encryption Key
+
+Key Encryption Key -> criptografa chave privada da identidade
+
+Chave privada criptografada -> armazenamento interno do aplicativo
+
+O Android Keystore é destinado a armazenar ou proteger material criptográfico, podendo impedir a extração direta das chaves e restringir como elas são utilizadas.
+
+ADIÇÃO DE CONTATO
+
+O protótipo não deve permitir pesquisar usuários pelo nome.
+
+Os contatos serão adicionados por QR Code.
+
+Celular A mostra QR Code -> celular B escaneia -> B importa identidade pública de A -> B mostra seu QR Code -> A escaneia -> ambos armazenam as identidades públicas
+
+O QR Code deve conter:
+
+ProtocolVersion
+
+PeerID
+
+IdentityPublicKey
+
+Nome sugerido opcional
+
+Chave pública de conexão, caso separada
+
+Código ou endereço de convite temporário opcional
+
+Assinatura do conteúdo
+
+Formato conceitual:
+
+protocolVersion + peerId + identityPublicKey + displayName + timestamp + signature
+
+Ao importar:
+
+Ler QR Code -> verificar se Peer ID corresponde à chave pública -> verificar assinatura do pacote -> calcular fingerprint -> mostrar fingerprint -> usuário confirma -> salvar contato
+
+Depois da confirmação:
+
+PeerID de Ana -> chave pública de Ana -> estado VERIFIED
+
+PeerID de Gabriel -> chave pública de Gabriel -> estado VERIFIED
+
+Para o protótipo com duas pessoas, o QR Code deve ser trocado presencialmente. Isso elimina o MITM do primeiro contato porque a chave pública é recebida diretamente do aparelho da pessoa.
+
+FINGERPRINT
+
+Cada contato deve possuir um código de segurança legível.
+
+Chave pública local + chave pública remota -> ordenar as duas chaves -> aplicar hash -> gerar fingerprint
+
+Exemplo visual:
+
+5831 2409 8821 4172 6630 1917
+
+Também pode ser mostrado como QR Code.
+
+Contato adicionado -> fingerprint confirmado presencialmente -> contato marcado como verificado
+
+Se a chave apresentada mudar posteriormente:
+
+Nova conexão -> chave recebida diferente da chave salva -> bloquear autenticação -> não entregar mensagens -> mostrar alerta de identidade alterada
+
+Nunca substituir automaticamente uma chave conhecida.
+
+AUTENTICAÇÃO ENTRE PEERS
+
+A criptografia padrão do transporte WebRTC não é suficiente para representar a identidade permanente do contato. Após abrir o DataChannel, o aplicativo deve executar um handshake próprio.
+
+Fluxo:
+
+WebRTC conecta -> A envia desafio aleatório para B -> B assina o desafio com sua chave privada -> B devolve chave pública e assinatura -> A verifica assinatura e Peer ID -> B faz o mesmo com A -> ambos confirmam contato conhecido -> conexão é autenticada
+
+Handshake detalhado:
+
+A gera nonceA -> A envia nonceA e PeerIDA
+
+B gera nonceB -> B assina nonceA + nonceB + PeerIDA + PeerIDB
+
+B envia nonceB + PeerIDB + assinaturaB
+
+A verifica PeerIDB -> compara chave pública com contato salvo -> verifica assinaturaB
+
+A assina nonceA + nonceB + PeerIDA + PeerIDB
+
+A envia assinaturaA
+
+B compara chave pública de A com contato salvo -> verifica assinaturaA
+
+Ambos derivam SessionKey -> canal passa para AUTHENTICATED
+
+Resultado:
+
+Pessoa conhece apenas o Peer ID -> não consegue se passar pelo contato
+
+Pessoa copia a chave pública -> não consegue produzir assinatura válida
+
+Servidor troca a sinalização -> não consegue autenticar como nenhum dos usuários
+
+Atacante altera a sinalização -> handshake falha ou conexão não corresponde ao contato salvo
+
+Atacante apresenta outra chave -> aplicativo bloqueia por incompatibilidade de fingerprint
+
+DERIVAÇÃO DA CHAVE DA CONVERSA
+
+Depois que os peers comprovarem suas identidades:
+
+A gera chave efêmera X25519 -> B gera chave efêmera X25519 -> ambos trocam chaves públicas efêmeras assinadas -> ambos calculam segredo compartilhado -> HKDF deriva SessionKey
+
+A chave efêmera deve ser assinada pela identidade permanente.
+
+A cria EphemeralPublicKeyA -> assina com IdentityPrivateKeyA -> envia para B
+
+B verifica assinatura de A -> cria EphemeralPublicKeyB -> assina com IdentityPrivateKeyB -> envia para A
+
+A e B calculam segredo X25519 -> HKDF gera SessionKey
+
+A SessionKey será utilizada para criptografar as mensagens daquela sessão.
+
+Ao reconectar:
+
+Nova conexão -> novas chaves efêmeras -> nova SessionKey
+
+Assim, comprometer uma chave de sessão não deve automaticamente revelar sessões futuras.
+
+SERVIDOR MÍNIMO DE ENCONTRO
+
+Para o primeiro protótipo funcionar entre redes diferentes, implementar um serviço mínimo de rendezvous e signaling.
+
+Esse serviço pode ser uma pequena aplicação própria ou uma implementação temporária em Supabase Realtime.
+
+O serviço não terá autenticação tradicional.
+
+O serviço deverá aceitar apenas registros temporários de sinalização associados a um código aleatório de sessão.
+
+Código de sessão criado -> Offer publicada -> destinatário consulta usando código -> destinatário publica Answer -> ICE Candidates são trocados -> WebRTC conecta -> registros são apagados ou expiram
+
+Dados permitidos no servidor:
+
+SessionID aleatório
+
+Offer SDP
+
+Answer SDP
+
+ICE Candidates
+
+Timestamp de expiração
+
+Mensagens de sinalização assinadas
+
+Dados proibidos:
+
+Mensagem de conversa
+
+Histórico
+
+Nome real
+
+Senha
+
+Login
+
+Lista permanente de contatos
+
+Chaves privadas
+
+Banco local
+
+A sinalização deve ser assinada.
+
+Peer cria signaling payload -> assina payload -> publica no rendezvous -> destinatário baixa -> verifica assinatura usando chave conhecida -> somente então utiliza Offer, Answer ou ICE Candidate
+
+Formato:
+
+sessionId + senderPeerId + receiverPeerId + type + payload + timestamp + nonce + signature
+
+O servidor não deve decidir se a assinatura é válida. Os próprios clientes validam.
+
+Para dificultar abuso no protótipo:
+
+SessionID deve possuir alta entropia
+
+Sinalização deve expirar rapidamente
+
+Quantidade de registros por sessão deve ser limitada
+
+Payload deve possuir tamanho máximo
+
+Sessões devem ser apagadas após conexão
+
+Não deve existir listagem pública de sessões
+
+Uma pessoa somente consegue acessar a sinalização se conhecer o SessionID ou convite
+
+WebRTC permite transportar dados arbitrários entre peers usando DataChannel. A sinalização necessária para formar a conexão deve ser fornecida pela aplicação; depois que o PeerConnection é estabelecido, os dados podem circular entre os peers.
+
+CONVITE PARA CONEXÃO
+
+Depois que o contato já estiver salvo, um dos usuários poderá iniciar a conversa.
+
+A abre contato de B -> A cria SessionID aleatório -> A cria Offer -> A assina Offer -> A publica no rendezvous -> B encontra convite -> B verifica assinatura -> B cria Answer -> B assina Answer -> B publica -> A verifica -> ICE Candidates são trocados -> WebRTC conecta
+
+Para o protótipo, existem duas formas de avisar B sobre o SessionID.
+
+Opção inicial mais simples:
+
+A gera código ou QR de conexão -> envia o código para B por qualquer meio -> B importa o código -> começa a sinalização
+
+Opção mais utilizável:
+
+Cada contato mantém um RendezvousToken secreto compartilhado na adição presencial -> aplicativo consulta periodicamente o canal derivado desse token -> A publica convite temporário -> B encontra automaticamente
+
+Fluxo recomendado para o teste com duas pessoas:
+
+Adicionar contato presencialmente -> trocar RendezvousToken pelo QR -> salvar token criptografado -> A publica convite no endereço derivado do token -> B consulta o mesmo endereço -> B recebe convite -> WebRTC conecta
+
+O RendezvousToken não é identidade e não autentica mensagens.
+
+RendezvousToken -> permite encontrar o convite
+
+Assinatura criptográfica -> comprova quem criou o convite
+
+Handshake -> autentica a conexão
+
+Isso evita login e permite que o contato apareça no aplicativo sem trocar códigos em cada conversa.
+
+STUN E TURN
+
+Configurar um servidor STUN para descobrir caminhos possíveis entre os aparelhos.
+
+A cria PeerConnection -> consulta STUN -> obtém ICE Candidates -> envia candidates pela sinalização -> B faz o mesmo -> WebRTC testa os caminhos -> conexão direta é escolhida
+
+Para o primeiro teste, começar com STUN.
+
+Se os aparelhos não conseguirem conectar por causa de CGNAT ou regras da operadora:
+
+Conexão direta falha -> utilizar TURN -> tráfego WebRTC passa pelo relay -> conteúdo continua protegido pelo handshake e pela criptografia da aplicação
+
+TURN não armazena histórico. Ele retransmite pacotes enquanto a conexão está ativa.
+
+O protótipo pode começar com:
+
+STUN obrigatório
+
+TURN configurável
+
+Sem TURN, aceitar que algumas combinações de redes móveis podem não conectar
+
+Para um protótipo que precisa funcionar consistentemente com sua namorada, é melhor preparar TURN desde o início, mesmo que seja utilizado somente quando necessário.
+
+WEBRTC DATA CHANNEL
+
+Criar apenas um PeerConnection por conversa ativa.
+
+PeerConnection conectado -> criar DataChannel chamado messages-v1 -> executar handshake -> marcar canal como autenticado -> trocar sincronização -> enviar mensagens
+
+Configuração inicial recomendada:
+
+Ordered: true
+
+Reliable: true
+
+MaxRetransmits: não definir
+
+Protocol: messages-v1
+
+O DataChannel deve carregar envelopes binários ou CBOR/Protocol Buffers, não objetos arbitrários sem versão.
+
+Envelope básico:
+
+protocolVersion
+
+packetType
+
+packetId
+
+senderPeerId
+
+receiverPeerId
+
+timestamp
+
+sequence
+
+encryptedPayload
+
+signature opcional do envelope
+
+Tipos iniciais:
+
+HELLO
+
+AUTH_CHALLENGE
+
+AUTH_RESPONSE
+
+KEY_EXCHANGE
+
+SYNC_SUMMARY
+
+SYNC_REQUEST
+
+MESSAGE
+
+DELIVERY_ACK
+
+READ_ACK
+
+PING
+
+PONG
+
+ERROR
+
+MENSAGEM DE TEXTO
+
+Cada mensagem deve ser criada localmente antes de ser enviada.
+
+Usuário toca em enviar -> gerar MessageID aleatório -> registrar timestamp local -> salvar mensagem como PENDING -> criptografar conteúdo -> criar pacote MESSAGE -> enviar pelo DataChannel
+
+Estrutura lógica:
+
+MessageID
+
+ConversationID
+
+SenderPeerID
+
+RecipientPeerID
+
+CreatedAt
+
+ClientSequence
+
+Ciphertext
+
+Nonce
+
+Status
+
+O texto puro não deve ser salvo como uma coluna desprotegida fora do banco criptografado.
+
+Envelope criptografado:
+
+messageId + conversationId + senderPeerId + recipientPeerId + timestamp + sequence + plaintext -> criptografar com SessionKey -> ciphertext
+
+O destinatário deve validar antes de salvar:
+
+Receber pacote -> verificar versão -> verificar remetente autenticado -> verificar recipientPeerId -> verificar MessageID duplicado -> descriptografar -> validar campos internos -> salvar -> enviar DELIVERY_ACK
+
+Status local:
+
+PENDING -> CONNECTING -> SENT -> DELIVERED -> READ
+
+PENDING:
+
+Mensagem existe somente no aparelho do remetente.
+
+SENT:
+
+Pacote foi entregue ao DataChannel, mas ainda não houve confirmação do destinatário.
+
+DELIVERED:
+
+Destinatário confirmou que salvou a mensagem no banco.
+
+READ:
+
+Destinatário abriu a conversa e enviou confirmação de leitura.
+
+MENSAGENS OFFLINE
+
+Não armazenar mensagens no rendezvous.
+
+B está offline -> A cria mensagem -> mensagem fica PENDING no banco de A -> aplicativo tenta conexão quando B reaparece -> conexão é autenticada -> A envia mensagens pendentes -> B confirma -> A marca como DELIVERED
+
+Se ambos estiverem offline:
+
+Nada acontece -> bancos locais preservam mensagens existentes
+
+Se o servidor de encontro cair:
+
+Convites novos deixam de funcionar -> mensagens locais não são perdidas -> conexão WebRTC já estabelecida pode continuar -> reconexão será tentada quando o serviço voltar
+
+PRESENÇA
+
+Não é necessário criar presença global no primeiro protótipo.
+
+O aplicativo pode usar tentativas de conexão pelo RendezvousToken.
+
+Aplicativo em primeiro plano -> consulta convite do contato -> responde caso exista
+
+Usuário tenta conversar -> publica convite com expiração -> espera resposta
+
+Posteriormente poderá existir presença efêmera:
+
+Peer publica heartbeat temporário assinado -> contato conhecido verifica -> mostra online
+
+Não armazenar “último acesso” no protótipo.
+
+BANCO LOCAL
+
+Usar Room para acesso ao banco.
+
+Usar SQLCipher ou solução equivalente para criptografar o banco completo.
+
+Tabelas mínimas:
+
+identity
+
+contacts
+
+conversations
+
+messages
+
+pending_packets
+
+sync_state
+
+rendezvous_state
+
+Identity:
+
+peerId
+
+encryptedPrivateKey
+
+publicKey
+
+createdAt
+
+Contacts:
+
+peerId
+
+displayName
+
+publicKey
+
+fingerprint
+
+trustState
+
+rendezvousTokenEncrypted
+
+addedAt
+
+lastIdentityChange
+
+Conversations:
+
+conversationId
+
+contactPeerId
+
+createdAt
+
+lastMessageAt
+
+Messages:
+
+messageId
+
+conversationId
+
+senderPeerId
+
+recipientPeerId
+
+createdAt
+
+clientSequence
+
+body
+
+status
+
+receivedAt
+
+readAt
+
+PendingPackets:
+
+packetId
+
+messageId
+
+recipientPeerId
+
+packetType
+
+attemptCount
+
+nextAttemptAt
+
+SyncState:
+
+conversationId
+
+lastLocalSequence
+
+lastRemoteSequence
+
+lastSyncAt
+
+O banco inteiro deve estar criptografado.
+
+Banco Room -> SQLCipher -> chave aleatória do banco -> chave do banco protegida pelo Android Keystore
+
+SINCRONIZAÇÃO
+
+Quando os aparelhos se conectarem, devem comparar o histórico da conversa.
+
+WebRTC autenticado -> A envia resumo -> B envia resumo -> ambos identificam mensagens ausentes -> solicitam MessageIDs ausentes -> transferem somente diferenças -> enviam confirmação
+
+Para o protótipo, usar uma sincronização simples por sequência e UUID.
+
+Cada remetente mantém sua própria sequência crescente dentro da conversa.
+
+Mensagens de A:
+
+A:1
+
+A:2
+
+A:3
+
+Mensagens de B:
+
+B:1
+
+B:2
+
+Resumo:
+
+highestSequenceFromA
+
+highestSequenceFromB
+
+Lista curta de MessageIDs recentes
+
+Fluxo:
+
+A informa que possui A:1 até A:8 e B:1 até B:5
+
+B informa que possui A:1 até A:6 e B:1 até B:5
+
+B solicita A:7 e A:8
+
+A envia A:7 e A:8
+
+B salva e confirma
+
+Para evitar falhas causadas por lacunas:
+
+Resumo de sequência -> detectar intervalo ausente -> solicitar intervalo -> comparar UUIDs recentes -> corrigir diferenças
+
+Não implementar edição ou exclusão para todos no primeiro protótipo.
+
+Inicialmente:
+
+Apagar conversa -> apagar apenas localmente
+
+Próxima sincronização -> mensagens que ainda existirem no aparelho do contato podem voltar
+
+Esse comportamento é aceito no protótipo.
+
+RECONEXÃO
+
+Quando o DataChannel fechar:
+
+Marcar contato como desconectado -> preservar mensagens pendentes -> aplicar atraso progressivo -> publicar novo convite quando apropriado -> refazer WebRTC -> repetir autenticação -> criar nova SessionKey -> sincronizar -> enviar pendências
+
+A reconexão nunca deve reutilizar automaticamente uma sessão criptográfica antiga.
+
+Nova conexão -> novo handshake -> novas chaves efêmeras -> nova SessionKey
+
+INTERFACE DO PROTÓTIPO
+
+Tela de criação da identidade:
+
+Criar identidade -> mostrar Peer ID -> mostrar opção de exportar QR público
+
+Tela de contatos:
+
+Lista de contatos locais
+
+Adicionar por QR Code
+
+Mostrar estado conectado ou desconectado
+
+Mostrar aviso de identidade alterada
+
+Tela de contato:
+
+Nome local
+
+Peer ID resumido
+
+Fingerprint
+
+Estado verificado
+
+Botão iniciar conexão
+
+Botão remover contato
+
+Tela de conversa:
+
+Histórico local
+
+Campo de texto
+
+Botão enviar
+
+Status de cada mensagem
+
+Estado da conexão
+
+Tela de segurança:
+
+Meu Peer ID
+
+Minha fingerprint
+
+QR Code da minha identidade
+
+Fingerprint do contato
+
+Opção de redefinir instalação
+
+Não incluir configurações avançadas desnecessárias.
+
+ESTRUTURA DO PROJETO
+
+app
+
+core/crypto
+
+IdentityManager
+
+SignatureManager
+
+KeyAgreementManager
+
+SessionCrypto
+
+FingerprintGenerator
+
+KeystoreManager
+
+core/webrtc
+
+PeerConnectionManager
+
+DataChannelManager
+
+IceServerConfig
+
+WebRtcObserver
+
+core/protocol
+
+Packet
+
+PacketCodec
+
+PacketType
+
+ProtocolVersion
+
+HandshakeProtocol
+
+core/signaling
+
+RendezvousClient
+
+SignalingMessage
+
+SignalingVerifier
+
+InviteManager
+
+data/local
+
+AppDatabase
+
+IdentityEntity
+
+ContactEntity
+
+ConversationEntity
+
+MessageEntity
+
+PendingPacketEntity
+
+SyncStateEntity
+
+data/repository
+
+IdentityRepository
+
+ContactRepository
+
+ConversationRepository
+
+MessageRepository
+
+ConnectionRepository
+
+domain
+
+CreateIdentity
+
+ImportContact
+
+ConnectToContact
+
+AuthenticatePeer
+
+SendMessage
+
+ReceiveMessage
+
+SynchronizeConversation
+
+RetryPendingMessages
+
+ui
+
+IdentityScreen
+
+ContactsScreen
+
+AddContactScreen
+
+ContactSecurityScreen
+
+ConversationScreen
+
+ORDEM DE IMPLEMENTAÇÃO
+
+ETAPA 1 — PROJETO BASE
+
+Criar projeto Android -> configurar Kotlin -> configurar Jetpack Compose -> adicionar navegação -> configurar injeção de dependências -> criar módulos principais
+
+Resultado:
+
+Aplicativo abre e navega entre telas vazias.
+
+ETAPA 2 — IDENTIDADE LOCAL
+
+Integrar biblioteca criptográfica -> gerar Ed25519 -> gerar Peer ID -> proteger chave privada -> persistir identidade -> mostrar QR Code público
+
+Resultado:
+
+Cada instalação possui uma identidade permanente e verificável.
+
+ETAPA 3 — CONTATOS VERIFICADOS
+
+Criar formato do QR -> importar chave pública -> verificar Peer ID -> gerar fingerprint -> confirmar contato -> salvar localmente
+
+Resultado:
+
+Dois celulares conseguem registrar um ao outro como contatos confiáveis.
+
+ETAPA 4 — RENDEZVOUS E SIGNALING
+
+Criar SessionID -> publicar Offer assinada -> receber e verificar Offer -> publicar Answer assinada -> trocar ICE Candidates -> expirar registros
+
+Resultado:
+
+Os dois aparelhos conseguem trocar dados necessários para formar WebRTC sem login.
+
+ETAPA 5 — CONEXÃO WEBRTC
+
+Inicializar PeerConnectionFactory -> configurar STUN/TURN -> criar PeerConnection -> criar DataChannel -> processar Offer/Answer -> processar ICE -> observar estado da conexão
+
+Resultado:
+
+DataChannel abre entre os dois celulares.
+
+ETAPA 6 — HANDSHAKE DE IDENTIDADE
+
+Criar nonce -> solicitar assinatura -> verificar chave salva -> realizar autenticação mútua -> trocar chaves efêmeras assinadas -> derivar SessionKey
+
+Resultado:
+
+O DataChannel somente é aceito após ambos provarem suas identidades.
+
+ETAPA 7 — ENVIO DE TEXTO
+
+Criar mensagem -> salvar PENDING -> criptografar -> enviar -> receber -> descriptografar -> salvar -> confirmar entrega
+
+Resultado:
+
+Eu e minha namorada conseguimos trocar textos diretamente.
+
+ETAPA 8 — BANCO CRIPTOGRAFADO
+
+Integrar Room -> integrar criptografia integral do banco -> proteger chave do banco -> criar DAOs -> migrar mensagens temporárias para persistência segura
+
+Resultado:
+
+Copiar o arquivo do banco não revela as mensagens.
+
+ETAPA 9 — OFFLINE E RECONEXÃO
+
+Criar fila local -> detectar canal fechado -> tentar reconectar -> autenticar novamente -> enviar pendências -> atualizar status
+
+Resultado:
+
+Mensagem enviada enquanto o contato está desconectado permanece local e é entregue quando ambos conectarem.
+
+ETAPA 10 — SINCRONIZAÇÃO
+
+Trocar resumos -> detectar mensagens ausentes -> solicitar intervalos -> reenviar diferenças -> deduplicar por MessageID
+
+Resultado:
+
+Os dois bancos convergem quando os aparelhos voltam a se encontrar.
+
+CRITÉRIO DE PROTÓTIPO CONCLUÍDO
+
+O protótipo será considerado funcional quando:
+
+Dois aparelhos criam identidades diferentes
+
+Os aparelhos adicionam um ao outro por QR Code
+
+Cada aparelho salva a chave pública e fingerprint do contato
+
+Um aparelho consegue iniciar conexão com o outro pela internet
+
+Offer, Answer e ICE Candidates são assinados
+
+WebRTC DataChannel é estabelecido
+
+Os peers executam autenticação mútua
+
+Uma chave de sessão é derivada
+
+Mensagens são criptografadas antes de entrar no DataChannel
+
+Mensagens são descriptografadas somente pelo contato correto
+
+Mensagens ficam armazenadas em banco local criptografado
+
+Mensagens offline ficam pendentes no remetente
+
+Mensagens pendentes são enviadas após reconexão
+
+O destinatário confirma o armazenamento
+
+O histórico é sincronizado por diferenças
+
+Alterar a chave pública de um contato provoca bloqueio
+
+O servidor não possui contas, senhas, mensagens ou histórico
+
+TESTES OBRIGATÓRIOS
+
+Teste de identidade:
+
+Criar identidade -> fechar aplicativo -> abrir novamente -> Peer ID continua igual
+
+Teste de contato:
+
+Adicionar QR verdadeiro -> contato é aceito
+
+Alterar conteúdo do QR -> assinatura ou Peer ID falha -> contato é rejeitado
+
+Teste de personificação:
+
+Servidor fornece Offer assinada por chave diferente -> aplicativo rejeita
+
+Atacante usa mesmo Peer ID com outra chave -> derivação não corresponde -> aplicativo rejeita
+
+Contato conhecido reinstala e aparece com outra chave -> aplicativo bloqueia e alerta
+
+Teste de mensagem:
+
+Enviar texto -> destinatário recebe exatamente uma vez
+
+Reenviar mesmo MessageID -> destinatário ignora duplicata
+
+Alterar ciphertext -> autenticação criptográfica falha
+
+Alterar senderPeerId -> validação falha
+
+Teste offline:
+
+Desligar celular B -> enviar de A -> mensagem permanece PENDING
+
+Ligar B -> conectar -> mensagem é entregue -> status muda para DELIVERED
+
+Teste de sincronização:
+
+Apagar dados recentes de um aparelho de teste -> reconectar -> mensagens ausentes são recuperadas do outro aparelho
+
+Teste de banco:
+
+Copiar arquivo do banco -> tentar abrir como SQLite comum -> conteúdo permanece ilegível
+
+Teste de rede:
+
+Wi-Fi para Wi-Fi
+
+Wi-Fi para 4G ou 5G
+
+4G ou 5G para Wi-Fi
+
+Redes móveis diferentes
+
+STUN direto
+
+Fallback por TURN
+
+DECISÕES FIXAS DO MVP
+
+Sem login e senha
+
+Sem conta central
+
+Sem username global
+
+Sem diretório público
+
+Sem aceitar desconhecidos automaticamente
+
+Contato adicionado por QR Code
+
+Identidade baseada em chave pública
+
+Contato conhecido fixado pela fingerprint
+
+Troca de identidade nunca é aceita automaticamente
+
+Servidor apenas para rendezvous e sinalização efêmera
+
+WebRTC DataChannel para mensagens
+
+E2EE própria acima do transporte WebRTC
+
+Banco local criptografado
+
+Mensagens offline guardadas somente no remetente
+
+Sincronização apenas entre os dois participantes
+
+Sem grupos no protótipo
+
+Sem recuperação de identidade no protótipo
+
+Sem troca legítima de aparelho no protótipo
+
+Sem edição e exclusão para todos no protótipo
+
+Sem mídia no protótipo
+
+LIMITAÇÃO ACEITA NA PRIMEIRA VERSÃO
+
+Se a pessoa apagar o aplicativo ou perder o aparelho, sua chave de identidade será perdida.
+
+Nesse caso:
+
+Nova instalação -> nova identidade -> contatos detectam chave diferente -> contato antigo não é substituído automaticamente
+
+A recuperação por frase, migração assinada, dispositivo adicional e aprovação manual será implementada depois que o mensageiro básico estiver funcionando.
+
+Essa limitação é preferível a criar um mecanismo de recuperação incompleto que permita personificação.
+
+FLUXO FINAL DO TESTE
+
+Eu instalo o aplicativo -> aplicativo cria minha identidade -> minha namorada instala -> aplicativo cria a identidade dela -> mostramos nossos QR Codes -> ambos confirmamos fingerprints -> cada aparelho salva o outro como contato -> eu abro a conversa -> aplicativo publica sinalização temporária assinada -> aparelho dela responde -> WebRTC conecta -> ambos comprovam posse das chaves privadas -> nova chave de sessão é criada -> eu envio uma mensagem -> mensagem é salva localmente -> mensagem é criptografada -> mensagem passa pelo DataChannel -> aparelho dela verifica e descriptografa -> mensagem é salva no banco criptografado -> confirmação retorna -> minha mensagem aparece como entregue
