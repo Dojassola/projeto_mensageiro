@@ -21,6 +21,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.lazy.LazyColumn
@@ -73,7 +74,12 @@ import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -97,6 +103,7 @@ import com.mensageiro.core.crypto.LocalIdentity
 import com.mensageiro.core.crypto.MessageStatus
 import com.mensageiro.core.crypto.ProfilePhotoStore
 import com.mensageiro.core.crypto.StoredAttachment
+import com.mensageiro.core.crypto.StoredMessage
 import com.mensageiro.core.crypto.VerifiedContact
 import com.mensageiro.core.MessagingRuntime
 import com.mensageiro.core.MessagingService
@@ -1153,11 +1160,14 @@ private fun ConversationScreen(
     val attachmentStore = remember { AttachmentStore(context) }
     val profilePhotos = remember { ProfilePhotoStore(context) }
     val scope = rememberCoroutineScope()
-    var text by rememberSaveable { mutableStateOf("") }
-    var fileStatus by rememberSaveable { mutableStateOf("") }
-    var deleting by remember { mutableStateOf<com.mensageiro.core.crypto.StoredMessage?>(null) }
+    var text by rememberSaveable(contact?.peerId) { mutableStateOf("") }
+    var fileStatus by rememberSaveable(contact?.peerId) { mutableStateOf("") }
+    var replyToId by rememberSaveable(contact?.peerId) { mutableStateOf<String?>(null) }
+    var editingId by rememberSaveable(contact?.peerId) { mutableStateOf<String?>(null) }
+    var messageOptions by remember(contact?.peerId) { mutableStateOf<StoredMessage?>(null) }
     var snapshot by remember(contact?.peerId) { mutableStateOf(MessagingRuntime.snapshot()) }
     var clock by remember { mutableStateOf(System.currentTimeMillis()) }
+    val composerFocus = remember(contact?.peerId) { FocusRequester() }
     val listState = rememberLazyListState()
     val listener = remember(contact?.peerId) { MessagingRuntime.Listener { snapshot = it } }
     val chooseFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -1183,8 +1193,21 @@ private fun ConversationScreen(
     }
     val messages = snapshot.messages
     val connected = snapshot.connected
+    fun startReply(message: StoredMessage) {
+        if (editingId != null) text = ""
+        editingId = null
+        replyToId = message.id
+    }
+    fun startEdit(message: StoredMessage) {
+        replyToId = null
+        editingId = message.id
+        text = message.text
+    }
     LaunchedEffect(messages, contact?.peerId) {
         if (contact != null) MessagingRuntime.markRead()
+    }
+    LaunchedEffect(replyToId, editingId) {
+        if (replyToId != null || editingId != null) composerFocus.requestFocus()
     }
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
@@ -1293,54 +1316,83 @@ private fun ConversationScreen(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = if (message.mine) Arrangement.End else Arrangement.Start
                             ) {
-                                Card(
-                                    Modifier.widthIn(min = 72.dp, max = bubbleWidth).combinedClickable(
-                                        onClick = {},
-                                        onLongClick = { deleting = message }
-                                    )
+                                SwipeMessage(
+                                    message = message,
+                                    enabled = !message.mine || message.attachment == null,
+                                    onSwipe = {
+                                        if (message.mine) startEdit(message) else startReply(message)
+                                    }
                                 ) {
-                                    Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                                        val attachment = message.attachment
-                                        if (attachment == null) {
-                                            Text(message.text)
-                                        } else {
-                                            AttachmentPreview(attachment)
-                                            Text(attachment.name, style = MaterialTheme.typography.titleSmall)
-                                            Text(
-                                                android.text.format.Formatter.formatShortFileSize(context, attachment.size),
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                            if (attachment.complete) {
-                                                TextButton(onClick = {
-                                                    fileStatus = openAttachment(context, attachmentStore, attachment)
-                                                }) { Text("Abrir") }
-                                            } else {
-                                                Text(
-                                                    if (message.mine) "Arquivo indisponivel" else "Recebendo...",
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.primary
+                                    Card(
+                                        Modifier.widthIn(min = 72.dp, max = bubbleWidth).combinedClickable(
+                                            onClick = {},
+                                            onLongClickLabel = "Opcoes da mensagem",
+                                            onLongClick = { messageOptions = message }
+                                        )
+                                    ) {
+                                        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                                            message.replyToId?.let { targetId ->
+                                                val target = messages.firstOrNull { it.id == targetId }
+                                                MessageQuote(
+                                                    title = when {
+                                                        target == null -> "Mensagem"
+                                                        target.mine -> "Voce"
+                                                        else -> contact.displayName
+                                                    },
+                                                    text = target?.let(::messagePreview) ?: "Mensagem indisponivel"
                                                 )
+                                                Spacer(Modifier.height(6.dp))
                                             }
-                                        }
-                                        Row(
-                                            modifier = Modifier.align(Alignment.End).padding(top = 3.dp),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text(
-                                                messageTime(context, message.timestamp),
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                            if (message.mine) {
-                                                Spacer(Modifier.size(6.dp))
+                                            val attachment = message.attachment
+                                            if (attachment == null) {
+                                                Text(message.text)
+                                            } else {
+                                                AttachmentPreview(attachment)
+                                                Text(attachment.name, style = MaterialTheme.typography.titleSmall)
                                                 Text(
-                                                    messageStatus(message.status),
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = if (message.status == MessageStatus.PENDING) {
-                                                        MaterialTheme.colorScheme.primary
-                                                    } else MaterialTheme.colorScheme.onSurfaceVariant
+                                                    android.text.format.Formatter.formatShortFileSize(context, attachment.size),
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
                                                 )
+                                                if (attachment.complete) {
+                                                    TextButton(onClick = {
+                                                        fileStatus = openAttachment(context, attachmentStore, attachment)
+                                                    }) { Text("Abrir") }
+                                                } else {
+                                                    Text(
+                                                        if (message.mine) "Arquivo indisponivel" else "Recebendo...",
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                        color = MaterialTheme.colorScheme.primary
+                                                    )
+                                                }
+                                            }
+                                            Row(
+                                                modifier = Modifier.align(Alignment.End).padding(top = 3.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                if (message.editedAt > 0) {
+                                                    Text(
+                                                        "editada",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                    Spacer(Modifier.size(6.dp))
+                                                }
+                                                Text(
+                                                    messageTime(context, message.timestamp),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                                if (message.mine) {
+                                                    Spacer(Modifier.size(6.dp))
+                                                    Text(
+                                                        messageStatus(message.status),
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = if (message.status == MessageStatus.PENDING) {
+                                                            MaterialTheme.colorScheme.primary
+                                                        } else MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -1363,52 +1415,186 @@ private fun ConversationScreen(
             modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)
         ) {
             val compactComposer = maxWidth < 360.dp
-            Row(
-                modifier = Modifier.fillMaxWidth()
-                    .padding(horizontal = if (compactComposer) 6.dp else 10.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                TextButton(
-                    onClick = { chooseFile.launch(arrayOf("*/*")) },
-                    modifier = Modifier.size(48.dp),
-                    contentPadding = PaddingValues(0.dp)
-                ) { Text("+") }
-                Spacer(Modifier.size(if (compactComposer) 4.dp else 8.dp))
-                OutlinedTextField(
-                    value = text,
-                    onValueChange = { text = it },
-                    modifier = Modifier.weight(1f).widthIn(min = 0.dp),
-                    placeholder = { Text("Mensagem") },
-                    maxLines = 4
-                )
-                Spacer(Modifier.size(if (compactComposer) 4.dp else 8.dp))
-                Button(
-                    onClick = {
-                        MessagingRuntime.send(text)
-                        text = ""
-                    },
-                    enabled = text.isNotBlank(),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
-                ) { Text("Enviar") }
+            val targetId = editingId ?: replyToId
+            val target = messages.firstOrNull { it.id == targetId }
+            Column {
+                if (targetId != null) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .padding(start = 14.dp, top = 6.dp, bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                if (editingId != null) "Editando mensagem"
+                                else "Respondendo a ${if (target?.mine == true) "voce" else contact.displayName}",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                target?.let(::messagePreview) ?: "Mensagem indisponivel",
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        TextButton(
+                            onClick = {
+                                if (editingId != null) text = ""
+                                editingId = null
+                                replyToId = null
+                            },
+                            modifier = Modifier.size(48.dp),
+                            contentPadding = PaddingValues(0.dp)
+                        ) { Text("X") }
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth()
+                        .padding(horizontal = if (compactComposer) 6.dp else 10.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(
+                        onClick = { chooseFile.launch(arrayOf("*/*")) },
+                        modifier = Modifier.size(48.dp),
+                        enabled = editingId == null && replyToId == null,
+                        contentPadding = PaddingValues(0.dp)
+                    ) { Text("+") }
+                    Spacer(Modifier.size(if (compactComposer) 4.dp else 8.dp))
+                    OutlinedTextField(
+                        value = text,
+                        onValueChange = { if (it.length <= 4_000) text = it },
+                        modifier = Modifier.weight(1f).widthIn(min = 0.dp).focusRequester(composerFocus),
+                        placeholder = { Text(if (editingId == null) "Mensagem" else "Editar mensagem") },
+                        maxLines = 4
+                    )
+                    Spacer(Modifier.size(if (compactComposer) 4.dp else 8.dp))
+                    Button(
+                        onClick = {
+                            val editing = editingId
+                            if (editing == null) {
+                                MessagingRuntime.send(text, replyToId)
+                                text = ""
+                                replyToId = null
+                            } else {
+                                val error = MessagingRuntime.editMessage(editing, text)
+                                fileStatus = error
+                                if (error.isBlank()) {
+                                    text = ""
+                                    editingId = null
+                                }
+                            }
+                        },
+                        enabled = text.isNotBlank(),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                    ) { Text(if (editingId == null) "Enviar" else "Salvar") }
+                }
             }
         }
     }
 
-    deleting?.let { message ->
+    messageOptions?.let { message ->
         AlertDialog(
-            onDismissRequest = { deleting = null },
-            title = { Text("Excluir mensagem?") },
-            text = { Text("Ela sera excluida apenas deste aparelho.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    MessagingRuntime.deleteMessage(message.id)
-                    deleting = null
-                }) { Text("Excluir") }
+            onDismissRequest = { messageOptions = null },
+            title = { Text("Mensagem") },
+            text = {
+                Column {
+                    TextButton(onClick = {
+                        startReply(message)
+                        messageOptions = null
+                    }) { Text("Responder") }
+                    if (message.mine && message.attachment == null) {
+                        TextButton(onClick = {
+                            startEdit(message)
+                            messageOptions = null
+                        }) { Text("Editar") }
+                    }
+                    TextButton(onClick = {
+                        MessagingRuntime.deleteMessage(message.id)
+                        if (editingId == message.id) {
+                            editingId = null
+                            text = ""
+                        }
+                        if (replyToId == message.id) replyToId = null
+                        messageOptions = null
+                    }) { Text("Excluir para mim") }
+                    if (message.mine) {
+                        TextButton(onClick = {
+                            val error = MessagingRuntime.deleteMessageForEveryone(message.id)
+                            fileStatus = error
+                            if (error.isBlank()) {
+                                if (editingId == message.id) {
+                                    editingId = null
+                                    text = ""
+                                }
+                                if (replyToId == message.id) replyToId = null
+                                messageOptions = null
+                            }
+                        }) { Text("Excluir para todos") }
+                    }
+                }
             },
-            dismissButton = { TextButton(onClick = { deleting = null }) { Text("Cancelar") } }
+            confirmButton = {
+                TextButton(onClick = { messageOptions = null }) { Text("Cancelar") }
+            }
         )
     }
 }
+
+@Composable
+private fun SwipeMessage(
+    message: StoredMessage,
+    enabled: Boolean,
+    onSwipe: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    var offset by remember(message.id) { mutableStateOf(0f) }
+    val threshold = with(LocalDensity.current) { 64.dp.toPx() }
+    Box(
+        Modifier.pointerInput(message.id, enabled) {
+            if (!enabled) return@pointerInput
+            detectHorizontalDragGestures(
+                onHorizontalDrag = { change, amount ->
+                    val next = offset + amount
+                    offset = if (message.mine) {
+                        next.coerceIn(-threshold * 1.25f, 0f)
+                    } else {
+                        next.coerceIn(0f, threshold * 1.25f)
+                    }
+                    change.consume()
+                },
+                onDragEnd = {
+                    val triggered = if (message.mine) offset <= -threshold else offset >= threshold
+                    offset = 0f
+                    if (triggered) onSwipe()
+                },
+                onDragCancel = { offset = 0f }
+            )
+        }.graphicsLayer { translationX = offset }
+    ) { content() }
+}
+
+@Composable
+private fun MessageQuote(title: String, text: String) {
+    Column(
+        Modifier.fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(horizontal = 8.dp, vertical = 6.dp)
+    ) {
+        Text(
+            title,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary
+        )
+        Text(text, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+private fun messagePreview(message: StoredMessage): String =
+    message.attachment?.let { "Arquivo: ${it.name}" } ?: message.text
 
 @Composable
 private fun AttachmentPreview(attachment: com.mensageiro.core.crypto.StoredAttachment) {

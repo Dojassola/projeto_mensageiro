@@ -173,7 +173,6 @@ object MessagingRuntime {
     @Synchronized
     fun editMessage(id: String, text: String): String {
         val session = sessions[selectedPeerId] ?: return "Contato indisponivel."
-        if (!session.connected) return "Conecte antes de editar."
         val store = messageStore ?: return "Mensagens indisponiveis."
         val message = store.forContact(session.contact.peerId)
             .firstOrNull { it.id == id && it.mine && !it.system && it.attachment == null }
@@ -189,7 +188,6 @@ object MessagingRuntime {
     @Synchronized
     fun deleteMessageForEveryone(id: String): String {
         val session = sessions[selectedPeerId] ?: return "Contato indisponivel."
-        if (!session.connected) return "Conecte antes de excluir para todos."
         val store = messageStore ?: return "Mensagens indisponiveis."
         val message = store.forContact(session.contact.peerId).firstOrNull { it.id == id && it.mine }
             ?: return "Somente mensagens enviadas por voce podem ser excluidas para todos."
@@ -365,20 +363,23 @@ object MessagingRuntime {
         if (!isCurrent(session)) return
         val store = messageStore ?: return
         val message = store.forContact(session.contact.peerId)
-            .firstOrNull { it.id == action.targetId && !it.mine && !it.system } ?: return
+            .firstOrNull { it.id == action.targetId }
         when (action.type) {
             MessageActionType.EDIT -> {
-                if (message.attachment == null && action.timestamp > message.editedAt) {
+                if (message != null && !message.mine && !message.system && message.attachment == null &&
+                    action.timestamp > message.editedAt
+                ) {
                     runCatching { store.edit(message.id, action.text, action.timestamp) }
                 }
             }
             MessageActionType.DELETE -> {
-                store.delete(message.id, deletedAt = action.timestamp)
-                context?.let {
-                    AttachmentStore(it).delete(message.id, message.attachment)
-                    it.getSystemService(NotificationManager::class.java)?.cancel(message.id.hashCode())
+                if (message?.mine == true || message?.system == true) return
+                store.delete(action.targetId, deletedAt = action.timestamp)
+                context?.let { app ->
+                    if (message != null) AttachmentStore(app).delete(message.id, message.attachment)
+                    app.getSystemService(NotificationManager::class.java)?.cancel(action.targetId.hashCode())
                 }
-                session.messenger?.cancelFile(message.id)
+                session.messenger?.cancelFile(action.targetId)
             }
         }
         dispatch()

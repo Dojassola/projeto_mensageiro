@@ -17,8 +17,8 @@ android {
         applicationId = "com.mensageiro"
         minSdk = 24
         targetSdk = 36
-        versionCode = 20
-        versionName = "0.19.0"
+        versionCode = 21
+        versionName = "0.20.0"
 
         ndk {
             abiFilters += setOf("armeabi-v7a", "arm64-v8a")

@@ -112,10 +112,11 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
         forEveryone: Boolean = false,
         deletedAt: Long = System.currentTimeMillis()
     ): StoredMessage? {
-        val message = messages.remove(id) ?: return null
+        val message = messages.remove(id)
+        if (message == null && deletedPrefs.getLong(id, 0) >= deletedAt) return null
         prefs.edit().remove(id).apply()
         deletedPrefs.edit().putLong(id, deletedAt).apply()
-        if (forEveryone && message.mine) {
+        if (forEveryone && message?.mine == true) {
             remoteDeletionPrefs.edit().putString(
                 id,
                 identityStore.protect("${message.contactPeerId}\n$deletedAt")
