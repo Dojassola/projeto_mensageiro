@@ -9,6 +9,10 @@ create table if not exists public.signals (
     expires_at timestamptz not null default (now() + interval '5 minutes')
 );
 
+create index if not exists signals_receiver_expires_id_idx
+    on public.signals(receiver_peer_id, expires_at, id);
+create index if not exists signals_expires_idx on public.signals(expires_at);
+
 alter table public.signals enable row level security;
 revoke all on public.signals from anon, authenticated;
 
@@ -43,7 +47,10 @@ language sql
 security definer
 set search_path = public
 as $$
-    with picked as (
+    with expired as (
+        delete from public.signals where expires_at < now()
+        returning id
+    ), picked as (
         select s.id
         from public.signals s
         where s.receiver_peer_id = p_receiver_peer_id

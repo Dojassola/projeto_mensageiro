@@ -17,8 +17,8 @@ android {
         applicationId = "com.mensageiro"
         minSdk = 24
         targetSdk = 36
-        versionCode = 19
-        versionName = "0.18.0"
+        versionCode = 20
+        versionName = "0.19.0"
 
         ndk {
             abiFilters += setOf("armeabi-v7a", "arm64-v8a")
@@ -81,6 +81,7 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.webrtc)
     implementation(libs.code.scanner)
+    implementation(libs.google.auth)
     implementation(libs.zxing.core)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))

@@ -20,8 +20,12 @@ data class StoredMessage(
     val system: Boolean,
     val text: String,
     val timestamp: Long,
-    val attachment: StoredAttachment? = null
+    val attachment: StoredAttachment? = null,
+    val replyToId: String? = null,
+    val editedAt: Long = 0
 )
+
+data class MessageDeletion(val id: String, val contactPeerId: String, val deletedAt: Long)
 
 enum class MessageStatus {
     PENDING,
@@ -35,6 +39,7 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
     private val prefs = this.context.getSharedPreferences("messages", Context.MODE_PRIVATE)
     private val presence = this.context.getSharedPreferences("presence", Context.MODE_PRIVATE)
     private val deletedPrefs = this.context.getSharedPreferences("deleted_messages", Context.MODE_PRIVATE)
+    private val remoteDeletionPrefs = this.context.getSharedPreferences("remote_deletions", Context.MODE_PRIVATE)
     private val messages = LinkedHashMap<String, StoredMessage>().apply {
         prefs.all.forEach { (id, value) ->
             runCatching { decode(id, identityStore.unprotect(value as String)) }
@@ -76,15 +81,58 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
     }
 
     @Synchronized
-    fun delete(id: String): StoredMessage? {
+    fun edit(id: String, text: String, editedAt: Long): StoredMessage? {
+        val message = messages[id] ?: return null
+        val body = text.trim()
+        require(!message.system && message.attachment == null && body.isNotEmpty() && body.length <= 4_000)
+        require(editedAt > message.editedAt)
+        return message.copy(text = body, editedAt = editedAt).also(::save)
+    }
+
+    @Synchronized
+    fun mergeSynced(message: StoredMessage): Boolean {
+        val current = messages[message.id] ?: return add(message)
+        val status = if (message.status.ordinal > current.status.ordinal) message.status else current.status
+        val newerEdit = message.editedAt > current.editedAt
+        if (!newerEdit && status == current.status) return false
+        save(
+            current.copy(
+                status = status,
+                text = if (newerEdit) message.text else current.text,
+                replyToId = if (newerEdit) message.replyToId else current.replyToId,
+                editedAt = maxOf(current.editedAt, message.editedAt)
+            )
+        )
+        return true
+    }
+
+    @Synchronized
+    fun delete(
+        id: String,
+        forEveryone: Boolean = false,
+        deletedAt: Long = System.currentTimeMillis()
+    ): StoredMessage? {
         val message = messages.remove(id) ?: return null
         prefs.edit().remove(id).apply()
-        deletedPrefs.edit().putLong(id, System.currentTimeMillis()).apply()
+        deletedPrefs.edit().putLong(id, deletedAt).apply()
+        if (forEveryone && message.mine) {
+            remoteDeletionPrefs.edit().putString(
+                id,
+                identityStore.protect("${message.contactPeerId}\n$deletedAt")
+            ).apply()
+        }
         AutomaticBackup.request(context)
         return message
     }
 
     fun deletedIds(): Set<String> = deletedPrefs.all.keys
+
+    fun remoteDeletions(peerId: String): List<MessageDeletion> = remoteDeletionPrefs.all.mapNotNull { (id, value) ->
+        runCatching {
+            val parts = identityStore.unprotect(value as String).split('\n', limit = 2)
+            MessageDeletion(id, parts[0], parts[1].toLong())
+        }.getOrNull()?.takeIf { it.contactPeerId == peerId }
+    }
 
     @Synchronized
     fun replaceDeleted(ids: Set<String>) {
@@ -97,6 +145,14 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
             messageEditor.remove(it)
         }
         messageEditor.apply()
+    }
+
+    fun replaceRemoteDeletions(deletions: List<MessageDeletion>) {
+        val editor = remoteDeletionPrefs.edit().clear()
+        deletions.forEach {
+            editor.putString(it.id, identityStore.protect("${it.contactPeerId}\n${it.deletedAt}"))
+        }
+        editor.apply()
     }
 
     fun addSystem(peerId: String, text: String, timestamp: Long = System.currentTimeMillis()) {
@@ -120,6 +176,29 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
     }
 
     private fun encode(message: StoredMessage): String {
+        if (message.replyToId != null || message.editedAt > 0) {
+            return "v4\n" + JSONObject()
+                .put("contactPeerId", message.contactPeerId)
+                .put("mine", message.mine)
+                .put("status", message.status.name)
+                .put("system", message.system)
+                .put("timestamp", message.timestamp)
+                .put("text", message.text)
+                .put("replyToId", message.replyToId)
+                .put("editedAt", message.editedAt)
+                .apply {
+                    message.attachment?.let { attachment ->
+                        put("attachment", JSONObject()
+                            .put("name", attachment.name)
+                            .put("mimeType", attachment.mimeType)
+                            .put("size", attachment.size)
+                            .put("sha256", attachment.sha256)
+                            .put("localPath", attachment.localPath)
+                            .put("complete", attachment.complete))
+                    }
+                }
+                .toString()
+        }
         val attachment = message.attachment ?: return (
             "v2\n${message.contactPeerId}\n${message.mine}\n${message.status.name}\n" +
                 "${message.system}\n${message.timestamp}\n${message.text}"
@@ -142,6 +221,31 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
     }
 
     private fun decode(id: String, text: String): StoredMessage {
+        if (text.startsWith("v4\n")) {
+            val value = JSONObject(text.substring(3))
+            val attachment = value.optJSONObject("attachment")?.let {
+                StoredAttachment(
+                    it.getString("name"),
+                    it.getString("mimeType"),
+                    it.getLong("size"),
+                    it.getString("sha256"),
+                    it.getString("localPath"),
+                    it.getBoolean("complete")
+                )
+            }
+            return StoredMessage(
+                id,
+                value.getString("contactPeerId"),
+                value.getBoolean("mine"),
+                MessageStatus.valueOf(value.getString("status")),
+                value.getBoolean("system"),
+                value.getString("text"),
+                value.getLong("timestamp"),
+                attachment,
+                value.optString("replyToId").takeIf { it.isNotBlank() && it != "null" },
+                value.optLong("editedAt")
+            )
+        }
         if (text.startsWith("v3\n")) {
             val value = JSONObject(text.substring(3))
             val attachment = value.getJSONObject("attachment")

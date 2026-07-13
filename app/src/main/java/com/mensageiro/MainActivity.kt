@@ -1,5 +1,6 @@
 package com.mensageiro
 
+import android.app.Activity
 import android.content.Intent
 import android.content.ClipboardManager
 import android.content.Context
@@ -9,11 +10,11 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.os.Build
-import android.net.Uri
 import android.text.format.DateFormat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -74,17 +75,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.mensageiro.core.crypto.ContactStore
 import com.mensageiro.core.crypto.BackupManager
 import com.mensageiro.core.crypto.AutomaticBackup
 import com.mensageiro.core.crypto.AttachmentStore
 import com.mensageiro.core.crypto.CryptoText
+import com.mensageiro.core.crypto.DriveBackupStorage
 import com.mensageiro.core.crypto.IdentityStore
 import com.mensageiro.core.crypto.LocalIdentity
 import com.mensageiro.core.crypto.MessageStatus
@@ -98,6 +105,7 @@ import com.mensageiro.core.AppUpdater
 import com.mensageiro.core.AppUpdate
 import com.mensageiro.core.DownloadedUpdate
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.android.gms.auth.api.identity.Identity
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.zxing.BarcodeFormat
@@ -221,13 +229,27 @@ fun MensageiroApp(incomingMessage: String? = null, onMessageConsumed: () -> Unit
         screen = Screen.Conversation
     }
 
-    fun renameContact(peerId: String, name: String) {
+    fun openContactProfile(contact: VerifiedContact) {
+        selectedPeerId = contact.peerId
+        MessagingRuntime.selectContact(context, contact.peerId)
+        screen = Screen.ContactProfile
+    }
+
+    fun renameContact(peerId: String, name: String): String {
         contactStatus = runCatching { contactStore.rename(peerId, name) }
             .fold({ "Contato renomeado." }, { "Falha: ${it.message}" })
         contacts = contactStore.all()
+        MessagingRuntime.start(context)
+        return contactStatus
     }
 
-    BackHandler(enabled = screen != Screen.Contacts) { screen = Screen.Contacts }
+    fun goBack() {
+        screen = if (screen == Screen.ContactProfile && contacts.any { it.peerId == selectedPeerId }) {
+            Screen.Conversation
+        } else Screen.Contacts
+    }
+
+    BackHandler(enabled = screen != Screen.Contacts) { goBack() }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val expanded = maxWidth >= 840.dp
@@ -238,7 +260,7 @@ fun MensageiroApp(incomingMessage: String? = null, onMessageConsumed: () -> Unit
                     AppTopBar(
                         screen = screen,
                         expanded = expanded,
-                        onContacts = { screen = Screen.Contacts },
+                        onContacts = ::goBack,
                         onAddContact = { screen = Screen.AddContact },
                         onProfile = { screen = Screen.Profile }
                     )
@@ -251,15 +273,17 @@ fun MensageiroApp(incomingMessage: String? = null, onMessageConsumed: () -> Unit
                     selectedPeerId = selectedPeerId.takeIf { screen == Screen.Conversation },
                     modifier = Modifier.padding(innerPadding),
                     onOpen = ::openContact,
-                    onRename = ::renameContact,
-                    onBack = { screen = Screen.Contacts }
+                    onProfile = ::openContactProfile,
+                    onBack = { screen = Screen.Contacts },
+                    onOpenProfile = { contacts.firstOrNull { it.peerId == selectedPeerId }?.let(::openContactProfile) },
+                    onReconnect = MessagingRuntime::reconnect
                 )
             } else when (screen) {
                 Screen.Contacts -> ContactsScreen(
                     contacts = contacts,
                     modifier = Modifier.padding(innerPadding),
                     onOpen = ::openContact,
-                    onRename = ::renameContact
+                    onProfile = ::openContactProfile
                 )
                 Screen.AddContact -> AddContactScreen(
                     identity,
@@ -270,7 +294,9 @@ fun MensageiroApp(incomingMessage: String? = null, onMessageConsumed: () -> Unit
                 Screen.Conversation -> ConversationScreen(
                     contact = contacts.firstOrNull { it.peerId == selectedPeerId },
                     modifier = Modifier.padding(innerPadding),
-                    onBack = { screen = Screen.Contacts }
+                    onBack = { screen = Screen.Contacts },
+                    onOpenProfile = { contacts.firstOrNull { it.peerId == selectedPeerId }?.let(::openContactProfile) },
+                    onReconnect = MessagingRuntime::reconnect
                 )
                 Screen.Profile -> ProfileScreen(
                     identity = identity,
@@ -283,6 +309,7 @@ fun MensageiroApp(incomingMessage: String? = null, onMessageConsumed: () -> Unit
                         runCatching { identityStore.rename(name) }
                             .onSuccess {
                                 identity = it
+                                MessagingRuntime.reload(context)
                                 screen = Screen.Contacts
                             }.exceptionOrNull()?.message.orEmpty()
                     },
@@ -293,6 +320,12 @@ fun MensageiroApp(incomingMessage: String? = null, onMessageConsumed: () -> Unit
                         MessagingRuntime.reload(context)
                         screen = Screen.Contacts
                     }
+                )
+                Screen.ContactProfile -> ContactProfileScreen(
+                    contact = contacts.firstOrNull { it.peerId == selectedPeerId },
+                    modifier = Modifier.padding(innerPadding),
+                    onSave = ::renameContact,
+                    onReconnect = MessagingRuntime::reconnect
                 )
             }
         }
@@ -414,8 +447,10 @@ private fun ExpandedConversationLayout(
     selectedPeerId: String?,
     modifier: Modifier,
     onOpen: (VerifiedContact) -> Unit,
-    onRename: (String, String) -> Unit,
-    onBack: () -> Unit
+    onProfile: (VerifiedContact) -> Unit,
+    onBack: () -> Unit,
+    onOpenProfile: () -> Unit,
+    onReconnect: () -> Unit
 ) {
     Box(modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
         Row(Modifier.fillMaxHeight().widthIn(max = 1_280.dp).fillMaxWidth()) {
@@ -424,7 +459,7 @@ private fun ExpandedConversationLayout(
                 modifier = Modifier.fillMaxHeight().width(360.dp),
                 selectedPeerId = selectedPeerId,
                 onOpen = onOpen,
-                onRename = onRename
+                onProfile = onProfile
             )
             VerticalDivider(Modifier.fillMaxHeight())
             val contact = contacts.firstOrNull { it.peerId == selectedPeerId }
@@ -440,6 +475,8 @@ private fun ExpandedConversationLayout(
                     contact = contact,
                     modifier = Modifier.weight(1f),
                     onBack = onBack,
+                    onOpenProfile = onOpenProfile,
+                    onReconnect = onReconnect,
                     showBack = false,
                     useStatusBarPadding = false
                 )
@@ -454,12 +491,10 @@ private fun ContactsScreen(
     modifier: Modifier,
     selectedPeerId: String? = null,
     onOpen: (VerifiedContact) -> Unit,
-    onRename: (String, String) -> Unit
+    onProfile: (VerifiedContact) -> Unit
 ) {
     val context = LocalContext.current
     val profilePhotos = remember { ProfilePhotoStore(context) }
-    var renaming by remember { mutableStateOf<VerifiedContact?>(null) }
-    var name by rememberSaveable { mutableStateOf("") }
     var revision by remember { mutableStateOf(0) }
     var clock by remember { mutableStateOf(System.currentTimeMillis()) }
     val listener = remember { MessagingRuntime.Listener { revision++ } }
@@ -527,10 +562,7 @@ private fun ContactsScreen(
                         )
                     }
                     TextButton(
-                        onClick = {
-                            renaming = contact
-                            name = contact.displayName
-                        },
+                        onClick = { onProfile(contact) },
                         modifier = Modifier.size(48.dp),
                         contentPadding = PaddingValues(0.dp)
                     ) { Text("...") }
@@ -540,22 +572,6 @@ private fun ContactsScreen(
         }
     }
 
-    renaming?.let { contact ->
-        AlertDialog(
-            onDismissRequest = { renaming = null },
-            title = { Text("Renomear contato") },
-            text = {
-                OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Nome") })
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    onRename(contact.peerId, name)
-                    renaming = null
-                }) { Text("Salvar") }
-            },
-            dismissButton = { TextButton(onClick = { renaming = null }) { Text("Cancelar") } }
-        )
-    }
 }
 
 @Composable
@@ -624,6 +640,126 @@ private fun AddContactScreen(
         }
         Spacer(Modifier.height(12.dp))
         Text(scannerError.ifBlank { result })
+    }
+}
+
+@Composable
+private fun ContactProfileScreen(
+    contact: VerifiedContact?,
+    modifier: Modifier,
+    onSave: (String, String) -> String,
+    onReconnect: () -> Unit
+) {
+    if (contact == null) {
+        ScreenColumn(modifier) { Text("Contato nao encontrado.") }
+        return
+    }
+    val context = LocalContext.current
+    val profilePhotos = remember { ProfilePhotoStore(context) }
+    var snapshot by remember(contact.peerId) { mutableStateOf(MessagingRuntime.snapshot()) }
+    var name by rememberSaveable(contact.peerId) { mutableStateOf(contact.displayName) }
+    var result by rememberSaveable(contact.peerId) { mutableStateOf("") }
+    var showPhoto by remember { mutableStateOf(false) }
+    var clock by remember { mutableStateOf(System.currentTimeMillis()) }
+    val listener = remember(contact.peerId) { MessagingRuntime.Listener { snapshot = it } }
+
+    DisposableEffect(contact.peerId) {
+        MessagingRuntime.addListener(listener)
+        onDispose { MessagingRuntime.removeListener(listener) }
+    }
+    LaunchedEffect(contact.peerId) {
+        while (true) {
+            clock = System.currentTimeMillis()
+            delay(30_000)
+        }
+    }
+
+    val photo = profilePhotos.remote(contact.peerId)
+    ScreenColumn(modifier = modifier) {
+        ProfileAvatar(
+            photo,
+            contact.displayName,
+            Modifier.size(112.dp)
+                .align(Alignment.CenterHorizontally)
+                .clickable(enabled = photo != null) { showPhoto = true }
+        )
+        Spacer(Modifier.height(12.dp))
+        Text(
+            contact.displayName,
+            modifier = Modifier.align(Alignment.CenterHorizontally),
+            style = MaterialTheme.typography.headlineSmall
+        )
+        Text(
+            if (snapshot.active) "online"
+            else if (snapshot.lastOnline > 0) "visto ha ${elapsedTime(clock - snapshot.lastOnline)}"
+            else snapshot.status,
+            modifier = Modifier.align(Alignment.CenterHorizontally),
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(24.dp))
+        OutlinedTextField(
+            value = name,
+            onValueChange = { name = it },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Apelido neste aparelho") },
+            singleLine = true
+        )
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = { result = onSave(contact.peerId, name) }, enabled = name.isNotBlank()) {
+                Text("Salvar")
+            }
+            Button(onClick = onReconnect) { Text("Reconectar") }
+        }
+        if (result.isNotBlank()) {
+            Spacer(Modifier.height(8.dp))
+            Text(result, style = MaterialTheme.typography.bodySmall)
+        }
+        Spacer(Modifier.height(12.dp))
+        Button(
+            onClick = {
+                val payload = ContactStore(context).all()
+                    .firstOrNull { it.peerId == contact.peerId }?.sharePayload.orEmpty()
+                if (payload.isBlank()) {
+                    result = "Conecte com este contato antes de compartilha-lo."
+                } else {
+                    result = ""
+                    runCatching {
+                        context.startActivity(
+                            Intent.createChooser(
+                                Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_TEXT, payload)
+                                },
+                                "Compartilhar contato"
+                            )
+                        )
+                    }.onFailure { result = "Nao foi possivel compartilhar o contato." }
+                }
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) { Text("Compartilhar contato") }
+        Spacer(Modifier.height(24.dp))
+        HorizontalDivider()
+        Spacer(Modifier.height(20.dp))
+        Text("Seguranca", style = MaterialTheme.typography.titleLarge)
+        Spacer(Modifier.height(12.dp))
+        Text("Fingerprint", style = MaterialTheme.typography.labelMedium)
+        Text(contact.fingerprint, style = MaterialTheme.typography.bodySmall)
+        Spacer(Modifier.height(12.dp))
+        Text("Peer ID", style = MaterialTheme.typography.labelMedium)
+        Text(contact.peerId, style = MaterialTheme.typography.bodySmall)
+        Spacer(Modifier.height(12.dp))
+        Text(
+            if (snapshot.connected) "Transporte: WebRTC conectado" else "Transporte: aguardando WebRTC",
+            style = MaterialTheme.typography.bodySmall,
+            color = if (snapshot.connected) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+
+    if (showPhoto && photo != null) {
+        ProfilePhotoDialog(photo, contact.displayName) { showPhoto = false }
     }
 }
 
@@ -717,22 +853,108 @@ private fun ProfileScreen(
             }
         }
     }
-    val automaticBackup = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/json")
-    ) { uri: Uri? ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        runCatching {
-            context.contentResolver.takePersistableUriPermission(
-                uri,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            )
-            AutomaticBackup.enable(context, uri, password)
-        }.onSuccess {
+    val driveClient = remember(context) { Identity.getAuthorizationClient(context) }
+    var pendingDriveAction by remember { mutableStateOf<DriveAction?>(null) }
+
+    val finishDriveAction: (DriveAction, String) -> Unit = { action, accessToken ->
+        pendingDriveAction = null
+        when (action) {
+            DriveAction.Enable -> {
+                val result = runCatching {
+                    AutomaticBackup.enableDrive(context, password)
+                    AutomaticBackup.runNow(context)
+                }
+                backupBusy = false
+                result.onSuccess {
+                    automaticStatus = AutomaticBackup.status(context)
+                    backupStatus = "Backup automatico ativado no Google Drive."
+                }.onFailure {
+                    backupStatus = "Falha ao ativar: ${it.message ?: "erro desconhecido"}"
+                }
+            }
+            DriveAction.Restore -> scope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val file = DriveBackupStorage.download(accessToken)
+                        backupManager.restore(file, password)
+                    }
+                }
+                backupBusy = false
+                result.onSuccess {
+                    backupStatus = "Restaurado do Drive: ${it.contacts} contatos e ${it.messages} mensagens."
+                    onRestored()
+                }.onFailure {
+                    backupStatus = "Falha ao restaurar do Drive: ${it.message ?: "erro desconhecido"}"
+                }
+            }
+        }
+    }
+    val driveAuthorization = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { activityResult ->
+        val action = pendingDriveAction ?: return@rememberLauncherForActivityResult
+        if (activityResult.resultCode != Activity.RESULT_OK || activityResult.data == null) {
+            pendingDriveAction = null
+            backupBusy = false
+            backupStatus = "Acesso ao Google Drive cancelado."
+            return@rememberLauncherForActivityResult
+        }
+        runCatching { driveClient.getAuthorizationResultFromIntent(activityResult.data!!) }
+            .onSuccess { authorization ->
+                val token = authorization.accessToken
+                if (token == null) {
+                    pendingDriveAction = null
+                    backupBusy = false
+                    backupStatus = "O Google Drive nao forneceu acesso."
+                } else finishDriveAction(action, token)
+            }
+            .onFailure {
+                pendingDriveAction = null
+                backupBusy = false
+                backupStatus = "Falha no Google Drive: ${it.message ?: "erro desconhecido"}"
+            }
+    }
+    val requestDrive: (DriveAction) -> Unit = { action ->
+        pendingDriveAction = action
+        backupBusy = true
+        driveClient.authorize(DriveBackupStorage.authorizationRequest())
+            .addOnSuccessListener { authorization ->
+                val resolution = authorization.pendingIntent
+                when {
+                    authorization.hasResolution() && resolution != null -> driveAuthorization.launch(
+                        IntentSenderRequest.Builder(resolution.intentSender).build()
+                    )
+                    authorization.accessToken != null -> finishDriveAction(action, authorization.accessToken!!)
+                    else -> {
+                        pendingDriveAction = null
+                        backupBusy = false
+                        backupStatus = "O Google Drive nao forneceu acesso."
+                    }
+                }
+            }
+            .addOnFailureListener {
+                pendingDriveAction = null
+                backupBusy = false
+                backupStatus = "Falha no Google Drive: ${it.message ?: "erro desconhecido"}"
+            }
+    }
+    val enableLocalBackup = {
+        val result = runCatching {
+            AutomaticBackup.enableLocal(context, password)
+            AutomaticBackup.runNow(context)
+        }
+        result.onSuccess {
             automaticStatus = AutomaticBackup.status(context)
             backupStatus = "Backup automatico ativado em ${automaticStatus.destination}."
         }.onFailure {
             backupStatus = "Falha ao ativar: ${it.message ?: "erro desconhecido"}"
         }
+    }
+    val storagePermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) enableLocalBackup()
+        else backupStatus = "Permissao de armazenamento negada."
     }
 
     ScreenColumn(modifier = modifier) {
@@ -811,32 +1033,39 @@ private fun ProfileScreen(
             Button(
                 onClick = { importBackup.launch(arrayOf("application/json", "text/plain")) },
                 enabled = password.length >= 6 && !backupBusy
-            ) { Text("Restaurar") }
+            ) { Text("Abrir backup") }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text("Backup automatico", style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Button(
+                onClick = { requestDrive(DriveAction.Enable) },
+                modifier = Modifier.weight(1f),
+                enabled = password.length >= 6 && !backupBusy
+            ) { Text("Google Drive") }
+            Button(
+                onClick = {
+                    if (Build.VERSION.SDK_INT <= 28 &&
+                        context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+                    ) storagePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                    else enableLocalBackup()
+                },
+                modifier = Modifier.weight(1f),
+                enabled = password.length >= 6 && !backupBusy
+            ) { Text("Local") }
         }
         Spacer(Modifier.height(8.dp))
         Button(
-            onClick = {
-                if (automaticStatus.enabled) {
-                    AutomaticBackup.disable(context)
-                    automaticStatus = AutomaticBackup.status(context)
-                    backupStatus = "Backup automatico desativado."
-                } else automaticBackup.launch("mensageiro-automatico.json")
-            },
-            enabled = automaticStatus.enabled || password.length >= 6
-        ) {
-            Text(
-                if (automaticStatus.enabled) "Desativar automatico"
-                else "Escolher Google Drive ou arquivo"
-            )
-        }
+            onClick = { requestDrive(DriveAction.Restore) },
+            enabled = password.length >= 6 && !backupBusy
+        ) { Text("Restaurar do Drive") }
         if (automaticStatus.enabled) {
             Spacer(Modifier.height(8.dp))
             Text("Destino: ${automaticStatus.destination}", style = MaterialTheme.typography.bodySmall)
-            Spacer(Modifier.height(8.dp))
-            Button(
-                onClick = { automaticBackup.launch("mensageiro-automatico.json") },
-                enabled = password.length >= 6
-            ) { Text("Alterar Drive ou arquivo") }
             Spacer(Modifier.height(8.dp))
             Button(onClick = {
                 AutomaticBackup.runNow(context)
@@ -864,6 +1093,12 @@ private fun ProfileScreen(
                     style = MaterialTheme.typography.bodySmall
                 )
             }
+            Spacer(Modifier.height(8.dp))
+            TextButton(onClick = {
+                AutomaticBackup.disable(context)
+                automaticStatus = AutomaticBackup.status(context)
+                backupStatus = "Backup automatico desativado."
+            }) { Text("Desativar automatico") }
         }
         if (backupStatus.isNotBlank()) {
             Spacer(Modifier.height(8.dp))
@@ -909,6 +1144,8 @@ private fun ConversationScreen(
     contact: VerifiedContact?,
     modifier: Modifier,
     onBack: () -> Unit,
+    onOpenProfile: () -> Unit,
+    onReconnect: () -> Unit,
     showBack: Boolean = true,
     useStatusBarPadding: Boolean = true
 ) {
@@ -938,9 +1175,9 @@ private fun ConversationScreen(
     DisposableEffect(contact?.peerId) {
         contact?.let { MessagingRuntime.selectContact(context, it.peerId) }
         MessagingRuntime.addListener(listener)
-        MessagingRuntime.setConversationVisible(contact != null)
+        MessagingRuntime.setConversationVisible(contact?.peerId, contact != null)
         onDispose {
-            MessagingRuntime.setConversationVisible(false)
+            MessagingRuntime.setConversationVisible(contact?.peerId, false)
             MessagingRuntime.removeListener(listener)
         }
     }
@@ -983,28 +1220,33 @@ private fun ConversationScreen(
                         contentPadding = PaddingValues(0.dp)
                     ) { Text("<") }
                 }
-                ProfileAvatar(
-                    profilePhotos.remote(contact.peerId),
-                    contact.displayName,
-                    Modifier.size(40.dp)
-                )
-                Spacer(Modifier.size(10.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(
+                Row(
+                    modifier = Modifier.weight(1f).clickable(onClick = onOpenProfile),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    ProfileAvatar(
+                        profilePhotos.remote(contact.peerId),
                         contact.displayName,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.titleMedium
+                        Modifier.size(40.dp)
                     )
-                    Text(
-                        if (snapshot.active) "online"
-                        else if (snapshot.lastOnline > 0) "visto ha ${elapsedTime(clock - snapshot.lastOnline)}"
-                        else snapshot.status,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Spacer(Modifier.size(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            contact.displayName,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Text(
+                            if (snapshot.active) "online"
+                            else if (snapshot.lastOnline > 0) "visto ha ${elapsedTime(clock - snapshot.lastOnline)}"
+                            else snapshot.status,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
                 Text(
                     "WebRTC",
@@ -1012,6 +1254,11 @@ private fun ConversationScreen(
                     color = if (connected) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                TextButton(
+                    onClick = onReconnect,
+                    modifier = Modifier.size(48.dp).semantics { contentDescription = "Reconectar" },
+                    contentPadding = PaddingValues(0.dp)
+                ) { Text("↻") }
             }
             HorizontalDivider()
         }
@@ -1204,6 +1451,32 @@ private fun ProfileAvatar(photo: StoredAttachment?, name: String, modifier: Modi
     }
 }
 
+@Composable
+private fun ProfilePhotoDialog(photo: StoredAttachment, name: String, onDismiss: () -> Unit) {
+    val bitmap by produceState<Bitmap?>(null, photo.localPath, photo.sha256) {
+        value = withContext(Dispatchers.IO) { decodePreview(photo.localPath) }
+    }
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
+    ) {
+        Box(Modifier.fillMaxSize().background(Color.Black)) {
+            bitmap?.let {
+                Image(
+                    bitmap = it.asImageBitmap(),
+                    contentDescription = "Foto de $name",
+                    modifier = Modifier.fillMaxSize().padding(16.dp),
+                    contentScale = ContentScale.Fit
+                )
+            }
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(8.dp)
+            ) { Text("Fechar", color = Color.White) }
+        }
+    }
+}
+
 private fun decodePreview(path: String): Bitmap? {
     if (!File(path).isFile) return null
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -1283,11 +1556,14 @@ private fun ScreenColumn(
     }
 }
 
+private enum class DriveAction { Enable, Restore }
+
 private enum class Screen(val title: String) {
     Contacts("Contatos"),
     AddContact("Adicionar"),
     Conversation("Conversa"),
-    Profile("Perfil")
+    Profile("Perfil"),
+    ContactProfile("Contato")
 }
 
 @Preview(name = "Compacta", showBackground = true, widthDp = 320, heightDp = 640)

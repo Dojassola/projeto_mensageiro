@@ -23,7 +23,8 @@ data class VerifiedContact(
     val publicKey: String,
     val encryptionPublicKey: String,
     val displayName: String,
-    val fingerprint: String
+    val fingerprint: String,
+    val sharePayload: String = ""
 )
 
 object CryptoText {
@@ -91,7 +92,8 @@ object CryptoText {
             publicKey = identity.publicKey,
             encryptionPublicKey = identity.encryptionPublicKey,
             displayName = identity.displayName.ifBlank { identity.peerId.take(12) },
-            fingerprint = fingerprint(localPublicKey, identity.publicKey)
+            fingerprint = fingerprint(localPublicKey, identity.publicKey),
+            sharePayload = payload.trim()
         )
     }
 

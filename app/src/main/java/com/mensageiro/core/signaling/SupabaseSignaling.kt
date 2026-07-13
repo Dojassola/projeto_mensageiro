@@ -31,17 +31,23 @@ class SupabaseSignaling {
 
     private fun request(function: String, body: JSONObject): String {
         val connection = URL("${RestUrl}rpc/$function").openConnection() as HttpURLConnection
-        connection.requestMethod = "POST"
-        connection.connectTimeout = 10_000
-        connection.readTimeout = 10_000
-        connection.doOutput = true
-        connection.setRequestProperty("apikey", PublishableKey)
-        connection.setRequestProperty("Content-Type", "application/json")
-        connection.outputStream.use { it.write(body.toString().toByteArray()) }
-        val response = (if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream)
-            ?.bufferedReader()?.use { it.readText() }.orEmpty()
-        check(connection.responseCode in 200..299) { "Supabase ${connection.responseCode}: $response" }
-        return response
+        return try {
+            connection.requestMethod = "POST"
+            connection.connectTimeout = 10_000
+            connection.readTimeout = 10_000
+            connection.doOutput = true
+            connection.setRequestProperty("apikey", PublishableKey)
+            connection.setRequestProperty("Content-Type", "application/json")
+            connection.setRequestProperty("Connection", "close")
+            connection.outputStream.use { it.write(body.toString().toByteArray()) }
+            val code = connection.responseCode
+            val response = (if (code in 200..299) connection.inputStream else connection.errorStream)
+                ?.bufferedReader()?.use { it.readText() }.orEmpty()
+            check(code in 200..299) { "Supabase $code: $response" }
+            response
+        } finally {
+            connection.disconnect()
+        }
     }
 
     private companion object {

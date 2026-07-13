@@ -5,10 +5,15 @@ import android.os.Handler
 import android.os.Looper
 import com.mensageiro.core.crypto.IdentityStore
 import com.mensageiro.core.crypto.AttachmentStore
+import com.mensageiro.core.crypto.ChatPayloadCodec
+import com.mensageiro.core.crypto.CryptoText
 import com.mensageiro.core.crypto.EncryptedFileChunk
 import com.mensageiro.core.crypto.FileChunkCodec
 import com.mensageiro.core.crypto.LocalIdentity
 import com.mensageiro.core.crypto.MessageCodec
+import com.mensageiro.core.crypto.MessageAction
+import com.mensageiro.core.crypto.MessageActionCodec
+import com.mensageiro.core.crypto.MessageActionType
 import com.mensageiro.core.crypto.MessageStatus
 import com.mensageiro.core.crypto.ReceivedMessage
 import com.mensageiro.core.crypto.ReceiptCodec
@@ -18,6 +23,7 @@ import com.mensageiro.core.crypto.StoredMessage
 import com.mensageiro.core.crypto.StoredAttachment
 import com.mensageiro.core.crypto.VerifiedContact
 import com.mensageiro.core.signaling.SignalingCodec
+import com.mensageiro.core.signaling.SignalingHub
 import com.mensageiro.core.signaling.SignalingMessage
 import com.mensageiro.core.signaling.SupabaseSignaling
 import org.json.JSONObject
@@ -42,8 +48,10 @@ class P2pMessenger(
     private val identity: LocalIdentity,
     private val contact: VerifiedContact,
     private val identityStore: IdentityStore,
+    private val signalingHub: SignalingHub,
     private val onState: (String, Boolean) -> Unit,
     private val onMessage: (ReceivedMessage) -> Unit,
+    private val onMessageAction: (MessageAction) -> Unit,
     private val onSent: (String) -> Unit,
     private val onReceipt: (String, MessageStatus) -> Unit,
     private val onPresence: (Boolean, Long) -> Unit,
@@ -54,12 +62,12 @@ class P2pMessenger(
     private val onFileRequested: (String, Long) -> Unit,
     private val onFileComplete: (String, StoredAttachment) -> Unit,
     private val onProfilePhoto: (StoredAttachment?) -> Unit,
+    private val onContactPayload: (String) -> Unit,
     private val isAppVisible: () -> Boolean
 ) {
     private val main = Handler(Looper.getMainLooper())
     private val executor = Executors.newSingleThreadScheduledExecutor()
     private val signaling = SupabaseSignaling()
-    private val signalPrefs = context.getSharedPreferences("signaling_state", Context.MODE_PRIVATE)
     private val attachmentStore = AttachmentStore(context)
     private val incomingFiles = ConcurrentHashMap<String, IncomingFile>()
     private val factory: PeerConnectionFactory
@@ -69,25 +77,37 @@ class P2pMessenger(
     private var sessionId: String? = null
     private var initiator = false
     private var generation = 0
+    private var retryDelay = InitialRetryDelay
     @Volatile private var closed = false
 
     init {
-        initializeWebRtc(context.applicationContext)
-        factory = PeerConnectionFactory.builder().createPeerConnectionFactory()
+        factory = peerConnectionFactory(context.applicationContext)
+        signalingHub.subscribe(contact.peerId, ::receiveSignal) {
+            state("Sinalizacao: $it", false)
+        }
         if (identity.peerId < contact.peerId) connect()
-        else state("Aguardando ${contact.displayName}...", false)
-        executor.scheduleWithFixedDelay(::poll, 0, 5, TimeUnit.SECONDS)
+        else {
+            signalingHub.setWaiting(contact.peerId, true, fast = true)
+            state("Aguardando ${contact.displayName}...", false)
+        }
         executor.scheduleWithFixedDelay({ sendPresence(isAppVisible()) }, 30, 30, TimeUnit.SECONDS)
     }
 
     fun connect() {
         if (closed) return
         executor.execute {
-        if (closed) return@execute
+            retryDelay = InitialRetryDelay
+            signalingHub.setWaiting(contact.peerId, true, fast = true)
+            beginConnection()
+        }
+    }
+
+    private fun beginConnection() {
+        if (closed) return
         if (identity.peerId >= contact.peerId) {
             resetPeer()
             state("Aguardando ${contact.displayName}...", false)
-            return@execute
+            return
         }
         resetPeer()
         state("Conectando...", false)
@@ -101,10 +121,14 @@ class P2pMessenger(
             }), offer)
         }), MediaConstraints.empty())
         val attempt = generation
+        val delay = retryDelay
+        retryDelay = (retryDelay * 2).coerceAtMost(MaxRetryDelay)
         executor.schedule({
-            if (!closed && attempt == generation && channel?.state() != DataChannel.State.OPEN) connect()
-        }, 25, TimeUnit.SECONDS)
-        }
+            if (!closed && attempt == generation && channel?.state() != DataChannel.State.OPEN) {
+                signalingHub.setWaiting(contact.peerId, true, fast = true)
+                beginConnection()
+            }
+        }, delay, TimeUnit.MILLISECONDS)
     }
 
     fun send(message: StoredMessage) {
@@ -119,7 +143,7 @@ class P2pMessenger(
             val payload = MessageCodec.create(
                 identity,
                 contact,
-                message.text,
+                ChatPayloadCodec.encode(message.text, message.replyToId),
                 message.id,
                 message.timestamp,
                 identityStore::sign
@@ -129,6 +153,35 @@ class P2pMessenger(
             }
             main.post { onSent(message.id) }
         }.onFailure { state("Falha: ${it.message}", true) }
+        }
+    }
+
+    fun sendEdit(message: StoredMessage) {
+        if (!message.mine || message.editedAt <= 0) return
+        sendAction(MessageAction(MessageActionType.EDIT, message.id, message.text, message.editedAt))
+    }
+
+    fun sendDelete(messageId: String, deletedAt: Long) {
+        sendAction(MessageAction(MessageActionType.DELETE, messageId, "", deletedAt))
+    }
+
+    private fun sendAction(action: MessageAction) {
+        if (closed) return
+        executor.execute {
+            val activeChannel = channel
+            if (activeChannel?.state() != DataChannel.State.OPEN) return@execute
+            runCatching {
+                val payload = MessageCodec.create(
+                    identity,
+                    contact,
+                    MessageActionCodec.encode(action),
+                    UUID.randomUUID().toString(),
+                    action.timestamp,
+                    identityStore::sign,
+                    maxLength = 5_000
+                )
+                check(sendPacket(activeChannel, "A|$payload")) { "Falha ao enviar operacao." }
+            }.onFailure { state("Falha na operacao: ${it.message}", true) }
         }
     }
 
@@ -174,6 +227,8 @@ class P2pMessenger(
                     .put("status", message.status.name)
                     .put("timestamp", message.timestamp)
                     .put("text", message.text)
+                    .put("replyToId", message.replyToId)
+                    .put("editedAt", message.editedAt)
                     .toString()
                 val payload = MessageCodec.create(
                     identity,
@@ -278,26 +333,20 @@ class P2pMessenger(
 
     fun close() {
         closed = true
+        signalingHub.setWaiting(contact.peerId, false)
+        signalingHub.unsubscribe(contact.peerId)
         executor.shutdownNow()
         resetPeer()
-        factory.dispose()
     }
 
-    private fun poll() {
-        if (closed || channel?.state() == DataChannel.State.OPEN) return
-        runCatching { signaling.read(identity.peerId) }
-            .onSuccess { rows ->
-                val lastId = signalPrefs.getLong(contact.peerId, 0)
-                rows.filter { it.first > lastId }.forEach { (_, payload) ->
-                    runCatching {
-                        SignalingCodec.verify(payload, contact.publicKey, identity.peerId)
-                    }.onSuccess(::handleSignal)
-                }
-                rows.maxOfOrNull { it.first }?.let {
-                    signalPrefs.edit().putLong(contact.peerId, maxOf(lastId, it)).apply()
-                }
-            }
-            .onFailure { state("Sinalizacao: ${it.message}", false) }
+    private fun receiveSignal(payload: String) {
+        if (closed) return
+        executor.execute {
+            if (closed) return@execute
+            runCatching { SignalingCodec.verify(payload, contact.publicKey, identity.peerId) }
+                .onSuccess(::handleSignal)
+                .onFailure { state("Sinalizacao rejeitada: ${it.message}", false) }
+        }
     }
 
     private fun handleSignal(message: SignalingMessage) {
@@ -414,6 +463,11 @@ class P2pMessenger(
             override fun onStateChange() {
                 if (channel !== dataChannel || closed) return
                 val open = dataChannel.state() == DataChannel.State.OPEN
+                signalingHub.setWaiting(contact.peerId, !open)
+                if (open) {
+                    retryDelay = InitialRetryDelay
+                    sendControl("I|${identity.publicPayload}")
+                }
                 state(if (open) "Conectado" else "Canal: ${dataChannel.state()}", open)
             }
 
@@ -422,6 +476,16 @@ class P2pMessenger(
                 buffer.data.get(bytes)
                 val packet = bytes.decodeToString()
                 when {
+                    packet.startsWith("I|") -> runCatching {
+                        val payload = packet.substring(2)
+                        val shared = CryptoText.verifyContact(payload, identity.publicKey)
+                        require(
+                            shared.peerId == contact.peerId && shared.publicKey == contact.publicKey &&
+                                shared.encryptionPublicKey == contact.encryptionPublicKey
+                        ) { "Identidade nao corresponde ao contato." }
+                        payload
+                    }.onSuccess { payload -> main.post { onContactPayload(payload) } }
+                        .onFailure { state("Identidade de contato rejeitada: ${it.message}", true) }
                     packet.startsWith("R|") -> runCatching {
                         ReceiptCodec.verify(packet.substring(2), identity, contact)
                     }.onSuccess { receipt -> main.post { onReceipt(receipt.messageId, receipt.status) } }
@@ -430,6 +494,13 @@ class P2pMessenger(
                         PresenceCodec.verify(packet.substring(2), identity, contact)
                     }.onSuccess { presence -> main.post { onPresence(presence.active, presence.timestamp) } }
                         .onFailure { state("Presenca rejeitada: ${it.message}", true) }
+                    packet.startsWith("A|") -> runCatching {
+                        val envelope = MessageCodec.open(
+                            packet.substring(2), identity, contact, identityStore::messageKey
+                        )
+                        MessageActionCodec.decode(envelope.text)
+                    }.onSuccess { action -> main.post { onMessageAction(action) } }
+                        .onFailure { state("Operacao de mensagem rejeitada: ${it.message}", true) }
                     packet == "Q|mensageiro-sync-v1" -> main.post { onSyncRequested(0) }
                     packet.startsWith("Q|mensageiro-sync-v2|") -> runCatching {
                         packet.substringAfterLast('|').toLong().also { require(it >= 0) }
@@ -458,7 +529,10 @@ class P2pMessenger(
                             if (sourceStatus == MessageStatus.READ) MessageStatus.READ else MessageStatus.DELIVERED,
                             false,
                             text,
-                            timestamp
+                            timestamp,
+                            replyToId = record.optString("replyToId")
+                                .takeIf { it.isNotBlank() && it != "null" },
+                            editedAt = record.optLong("editedAt")
                         )
                     }.onSuccess { message -> main.post { onSyncedMessage(message) } }
                         .onFailure { state("Sincronizacao rejeitada: ${it.message}", true) }
@@ -472,7 +546,9 @@ class P2pMessenger(
                         .onFailure { state("Pedido de arquivo rejeitado.", true) }
                     packet.startsWith("C|") -> receiveFileChunk(packet)
                     else -> runCatching {
-                        MessageCodec.open(packet, identity, contact, identityStore::messageKey)
+                        val envelope = MessageCodec.open(packet, identity, contact, identityStore::messageKey)
+                        val content = ChatPayloadCodec.decode(envelope.text)
+                        envelope.copy(text = content.text, replyToId = content.replyToId)
                     }.onSuccess { message -> main.post { onMessage(message) } }
                         .onFailure { state("Mensagem rejeitada: ${it.message}", true) }
                 }
@@ -634,15 +710,17 @@ class P2pMessenger(
 
     private companion object {
         const val ProfileMaxSize = 2L * 1024 * 1024
-        @Volatile private var initialized = false
+        const val InitialRetryDelay = 20_000L
+        const val MaxRetryDelay = 5 * 60_000L
+        @Volatile private var sharedFactory: PeerConnectionFactory? = null
 
         @Synchronized
-        fun initializeWebRtc(context: Context) {
-            if (initialized) return
+        fun peerConnectionFactory(context: Context): PeerConnectionFactory {
+            sharedFactory?.let { return it }
             PeerConnectionFactory.initialize(
                 PeerConnectionFactory.InitializationOptions.builder(context).createInitializationOptions()
             )
-            initialized = true
+            return PeerConnectionFactory.builder().createPeerConnectionFactory().also { sharedFactory = it }
         }
     }
 

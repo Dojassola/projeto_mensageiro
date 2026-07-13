@@ -16,7 +16,7 @@ class MessagingService : Service() {
     private val listener = MessagingRuntime.Listener { snapshot ->
         getSystemService(NotificationManager::class.java).notify(
             ServiceNotificationId,
-            Notifications.service(this, snapshot.status)
+            Notifications.service(this, snapshot.serviceStatus)
         )
     }
 

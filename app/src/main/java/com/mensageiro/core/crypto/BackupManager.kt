@@ -41,7 +41,8 @@ class BackupManager(context: Context) {
                         .put("peerId", contact.peerId)
                         .put("publicKey", contact.publicKey)
                         .put("encryptionPublicKey", contact.encryptionPublicKey)
-                        .put("displayName", contact.displayName))
+                        .put("displayName", contact.displayName)
+                        .put("sharePayload", contact.sharePayload))
                 }
             })
             .put("messages", JSONArray().apply {
@@ -54,6 +55,8 @@ class BackupManager(context: Context) {
                         .put("system", message.system)
                         .put("text", message.text)
                         .put("timestamp", message.timestamp)
+                        .put("replyToId", message.replyToId)
+                        .put("editedAt", message.editedAt)
                     message.attachment?.let { attachment ->
                         value.put("attachment", JSONObject()
                             .put("name", attachment.name)
@@ -65,6 +68,16 @@ class BackupManager(context: Context) {
                 }
             })
             .put("deletedMessages", JSONArray(messageStore.deletedIds().toList()))
+            .put("remoteDeletions", JSONArray().apply {
+                contactStore.all().forEach { contact ->
+                    messageStore.remoteDeletions(contact.peerId).forEach { deletion ->
+                        put(JSONObject()
+                            .put("id", deletion.id)
+                            .put("contactPeerId", deletion.contactPeerId)
+                            .put("deletedAt", deletion.deletedAt))
+                    }
+                }
+            })
 
         val salt = randomBytes(16)
         val iv = randomBytes(12)
@@ -115,7 +128,8 @@ class BackupManager(context: Context) {
                 value.getString("publicKey"),
                 value.getString("encryptionPublicKey"),
                 value.getString("displayName"),
-                ""
+                "",
+                value.optString("sharePayload")
             )
         }
         val validContacts = contactStore.validateForRestore(contacts, identity.publicKey)
@@ -140,7 +154,9 @@ class BackupManager(context: Context) {
                         "",
                         false
                     )
-                }
+                },
+                value.optString("replyToId").takeIf { it.isNotBlank() && it != "null" },
+                value.optLong("editedAt")
             )
         }
         validateMessages(messages, contactIds)
@@ -148,12 +164,23 @@ class BackupManager(context: Context) {
             (0 until values.length()).mapTo(mutableSetOf()) { values.getString(it) }
         } ?: emptySet()
         require(deletedIds.all { it.isNotBlank() && it.length <= 200 }) { "Exclusoes invalidas no backup." }
+        val remoteDeletions = data.optJSONArray("remoteDeletions")?.objects { value ->
+            MessageDeletion(
+                value.getString("id"),
+                value.getString("contactPeerId"),
+                value.getLong("deletedAt")
+            )
+        } ?: emptyList()
+        require(remoteDeletions.all {
+            it.id.isNotBlank() && it.id.length <= 200 && it.contactPeerId in contactIds && it.deletedAt > 0
+        }) { "Exclusoes remotas invalidas no backup." }
         val profile = profilePhotoStore.validateBackup(data.optJSONObject("profile"))
 
         identityStore.restoreBackup(identityBackup)
         contactStore.replaceAll(validContacts, identity.publicKey)
         messageStore.replaceAll(messages)
         messageStore.replaceDeleted(deletedIds)
+        messageStore.replaceRemoteDeletions(remoteDeletions)
         profilePhotoStore.restoreBackup(profile)
         return RestoreResult(validContacts.size, messages.size)
     }
@@ -164,6 +191,9 @@ class BackupManager(context: Context) {
             require(it.id.isNotBlank() && it.id.length <= 200) { "ID de mensagem invalido." }
             require(it.contactPeerId in contactIds) { "Mensagem vinculada a contato ausente." }
             require(it.timestamp > 0 && it.text.length <= 64_000) { "Mensagem invalida no backup." }
+            require(it.editedAt >= 0 && (it.replyToId == null || it.replyToId.length <= 200)) {
+                "Referencia de mensagem invalida no backup."
+            }
             it.attachment?.let { attachment ->
                 require(
                     attachment.name.isNotBlank() && attachment.name.length <= 160 &&
@@ -210,6 +240,8 @@ data class AutomaticBackupStatus(
 
 object AutomaticBackup {
     const val BackupInterval = 6 * 60 * 60 * 1_000L
+    private const val Drive = "drive"
+    private const val Local = "local"
     private const val InitialDelay = 10_000L
     private const val RetryDelay = 30 * 60 * 1_000L
     private val executor = Executors.newSingleThreadScheduledExecutor()
@@ -220,18 +252,28 @@ object AutomaticBackup {
     fun isEnabled(context: Context): Boolean = prefs(context).getBoolean("enabled", false)
 
     fun status(context: Context): AutomaticBackupStatus = prefs(context).let {
+        val destination = when (it.getString("type", null)) {
+            Drive -> DriveBackupStorage.DestinationName
+            Local -> LocalBackupStorage.DestinationName
+            else -> it.getString("destination", null)
+                ?: it.getString("uri", null)?.let { value -> destinationName(context, Uri.parse(value)) }.orEmpty()
+        }
         AutomaticBackupStatus(
             it.getBoolean("enabled", false),
             it.getLong("lastSuccess", 0),
             it.getLong("nextBackup", 0),
             it.getString("error", "").orEmpty(),
-            it.getString("destination", null)
-                ?: it.getString("uri", null)?.let { value -> destinationName(context, Uri.parse(value)) }.orEmpty()
+            destination
         )
     }
 
     @Synchronized
-    fun enable(context: Context, uri: Uri, password: String) {
+    fun enableDrive(context: Context, password: String) = enable(context, Drive, password)
+
+    @Synchronized
+    fun enableLocal(context: Context, password: String) = enable(context, Local, password)
+
+    private fun enable(context: Context, type: String, password: String) {
         require(password.length >= 6) { "Use uma senha com pelo menos 6 caracteres." }
         val app = context.applicationContext
         val protectedPassword = IdentityStore(app).protect(password)
@@ -239,9 +281,10 @@ object AutomaticBackup {
         pending = null
         prefs(app).edit()
             .putBoolean("enabled", true)
-            .putString("uri", uri.toString())
+            .putString("type", type)
             .putString("password", protectedPassword)
-            .putString("destination", destinationName(app, uri))
+            .remove("uri")
+            .remove("destination")
             .remove("lastSuccess")
             .remove("nextBackup")
             .remove("dirtyAt")
@@ -317,11 +360,17 @@ object AutomaticBackup {
         val preferences = prefs(context)
         val dirtyAt = preferences.getLong("dirtyAt", 0)
         val result = runCatching {
-            val uri = Uri.parse(requireNotNull(preferences.getString("uri", null)))
             val password = IdentityStore(context).unprotect(requireNotNull(preferences.getString("password", null)))
             val backup = BackupManager(context).export(password)
-            val stream = requireNotNull(context.contentResolver.openOutputStream(uri, "wt"))
-            stream.bufferedWriter().use { it.write(backup) }
+            when (preferences.getString("type", null)) {
+                Drive -> DriveBackupStorage.upload(DriveBackupStorage.accessToken(context), backup)
+                Local -> LocalBackupStorage.write(context, backup)
+                else -> {
+                    val uri = Uri.parse(requireNotNull(preferences.getString("uri", null)))
+                    val stream = requireNotNull(context.contentResolver.openOutputStream(uri, "wt"))
+                    stream.bufferedWriter().use { it.write(backup) }
+                }
+            }
         }
         finishWrite(context, dirtyAt, result.exceptionOrNull())
     }

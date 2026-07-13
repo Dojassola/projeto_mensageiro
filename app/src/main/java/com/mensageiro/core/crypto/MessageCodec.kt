@@ -4,7 +4,7 @@ import java.nio.charset.StandardCharsets
 import java.security.Signature
 import java.util.UUID
 
-data class ReceivedMessage(val id: String, val text: String, val timestamp: Long)
+data class ReceivedMessage(val id: String, val text: String, val timestamp: Long, val replyToId: String? = null)
 
 object MessageCodec {
     private const val Version = "mensageiro-message-v1"
