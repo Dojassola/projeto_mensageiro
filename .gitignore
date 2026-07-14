@@ -65,3 +65,4 @@ supabase/.temp/
 *.bak
 *.backup
 mensageiro-backup*
+*.ps1
