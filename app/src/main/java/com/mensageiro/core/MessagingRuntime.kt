@@ -72,7 +72,8 @@ object MessagingRuntime {
 
         val identity = identityStore!!.getOrCreate()
         if (signalingHub == null) signalingHub = SignalingHub(identity.peerId)
-        syncSessions(ContactStore(app).all(), identity)
+        val contacts = ContactStore(app)
+        syncSessions(contacts.all().filterNot { contacts.isBlocked(it.peerId) }, identity)
 
         val saved = app.getSharedPreferences("runtime", Context.MODE_PRIVATE)
             .getString("contact", null)
@@ -299,6 +300,7 @@ object MessagingRuntime {
         val app = context ?: return
         val identities = identityStore ?: return
         val hub = signalingHub ?: return
+        val contacts = ContactStore(app)
         val session = Session(contact)
         sessions[contact.peerId] = session
         session.messenger = P2pMessenger(
@@ -321,6 +323,7 @@ object MessagingRuntime {
             onFileComplete = { id, attachment -> onFileComplete(session, id, attachment) },
             onProfilePhoto = { onProfilePhoto(session, it) },
             onContactPayload = { onContactPayload(session, it) },
+            isBlocked = { contacts.isBlocked(contact.peerId) },
             isAppVisible = { appVisible }
         )
     }
@@ -330,6 +333,10 @@ object MessagingRuntime {
         if (!isCurrent(session)) return
         val app = context ?: return
         val store = messageStore ?: return
+        val replyToId = received.replyToId?.takeIf { id ->
+            val target = store.all().firstOrNull { it.id == id }
+            target == null || (target.contactPeerId == session.contact.peerId && !target.system)
+        }
         val added = store.add(
             StoredMessage(
                 received.id,
@@ -339,7 +346,7 @@ object MessagingRuntime {
                 false,
                 received.text,
                 received.timestamp,
-                replyToId = received.replyToId
+                replyToId = replyToId
             )
         )
         val savedStatus = store.forContact(session.contact.peerId)

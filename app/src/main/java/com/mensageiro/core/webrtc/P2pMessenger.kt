@@ -63,6 +63,7 @@ class P2pMessenger(
     private val onFileComplete: (String, StoredAttachment) -> Unit,
     private val onProfilePhoto: (StoredAttachment?) -> Unit,
     private val onContactPayload: (String) -> Unit,
+    private val isBlocked: () -> Boolean,
     private val isAppVisible: () -> Boolean
 ) {
     private val main = Handler(Looper.getMainLooper())
@@ -82,19 +83,24 @@ class P2pMessenger(
 
     init {
         factory = peerConnectionFactory(context.applicationContext)
-        signalingHub.subscribe(contact.peerId, ::receiveSignal) {
-            state("Sinalizacao: $it", false)
+        if (isBlocked()) {
+            closed = true
+            state("Contato bloqueado.", false)
+        } else {
+            signalingHub.subscribe(contact.peerId, ::receiveSignal) {
+                state("Sinalizacao: $it", false)
+            }
+            if (identity.peerId < contact.peerId) connect()
+            else {
+                signalingHub.setWaiting(contact.peerId, true, fast = true)
+                state("Aguardando ${contact.displayName}...", false)
+            }
+            executor.scheduleWithFixedDelay({ sendPresence(isAppVisible()) }, 30, 30, TimeUnit.SECONDS)
         }
-        if (identity.peerId < contact.peerId) connect()
-        else {
-            signalingHub.setWaiting(contact.peerId, true, fast = true)
-            state("Aguardando ${contact.displayName}...", false)
-        }
-        executor.scheduleWithFixedDelay({ sendPresence(isAppVisible()) }, 30, 30, TimeUnit.SECONDS)
     }
 
     fun connect() {
-        if (closed) return
+        if (closed || isBlocked()) return
         executor.execute {
             retryDelay = InitialRetryDelay
             signalingHub.setWaiting(contact.peerId, true, fast = true)
@@ -340,7 +346,7 @@ class P2pMessenger(
     }
 
     private fun receiveSignal(payload: String) {
-        if (closed) return
+        if (closed || isBlocked()) return
         executor.execute {
             if (closed) return@execute
             runCatching { SignalingCodec.verify(payload, contact.publicKey, identity.peerId) }

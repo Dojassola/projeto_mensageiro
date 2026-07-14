@@ -1,6 +1,7 @@
 package com.mensageiro
 
 import android.app.Activity
+import android.content.ClipData
 import android.content.Intent
 import android.content.ClipboardManager
 import android.content.Context
@@ -72,6 +73,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.produceState
@@ -84,8 +86,10 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -106,6 +110,7 @@ import com.mensageiro.core.crypto.DriveBackupStorage
 import com.mensageiro.core.crypto.IdentityStore
 import com.mensageiro.core.crypto.LocalIdentity
 import com.mensageiro.core.crypto.MessageStatus
+import com.mensageiro.core.crypto.MessageStore
 import com.mensageiro.core.crypto.ProfilePhotoStore
 import com.mensageiro.core.crypto.StoredAttachment
 import com.mensageiro.core.crypto.StoredMessage
@@ -123,6 +128,9 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import com.mensageiro.ui.theme.MensageiroTheme
+import com.mensageiro.ui.contacts.AddContactScreen
+import com.mensageiro.ui.contacts.ContactsScreen
+import com.mensageiro.ui.profile.BlockedContactsSection
 import java.util.Date
 import java.util.Calendar
 import java.io.File
@@ -255,11 +263,19 @@ fun MensageiroApp(incomingMessage: String? = null, onMessageConsumed: () -> Unit
         return contactStatus
     }
 
-    fun deleteContact(peerId: String) {
-        contactStore.remove(peerId)
+    fun deleteContact(peerId: String, deleteConversation: Boolean, deleteAttachments: Boolean, block: Boolean) {
+        val contact = contactStore.all().firstOrNull { it.peerId == peerId } ?: return
+        if (deleteConversation) {
+            val removed = MessageStore(context, identityStore).deleteConversation(peerId)
+            if (deleteAttachments) {
+                val attachmentStore = AttachmentStore(context)
+                removed.forEach { attachmentStore.delete(it.id, it.attachment) }
+            }
+        }
+        if (block) contactStore.block(contact) else contactStore.remove(peerId)
         contacts = contactStore.all()
         selectedPeerId = contacts.firstOrNull()?.peerId
-        MessagingRuntime.start(context)
+        MessagingRuntime.reload(context)
         screen = Screen.Contacts
     }
 
@@ -507,173 +523,12 @@ private fun ExpandedConversationLayout(
 }
 
 @Composable
-private fun ContactsScreen(
-    contacts: List<VerifiedContact>,
-    modifier: Modifier,
-    selectedPeerId: String? = null,
-    onOpen: (VerifiedContact) -> Unit,
-    onProfile: (VerifiedContact) -> Unit
-) {
-    val context = LocalContext.current
-    val profilePhotos = remember { ProfilePhotoStore(context) }
-    var revision by remember { mutableStateOf(0) }
-    var clock by remember { mutableStateOf(System.currentTimeMillis()) }
-    val listener = remember { MessagingRuntime.Listener { revision++ } }
-    DisposableEffect(Unit) {
-        MessagingRuntime.addListener(listener)
-        onDispose { MessagingRuntime.removeListener(listener) }
-    }
-    LaunchedEffect(Unit) {
-        while (true) {
-            clock = System.currentTimeMillis()
-            delay(30_000)
-        }
-    }
-    val previews = remember(contacts, revision, clock) {
-        contacts.associate { it.peerId to MessagingRuntime.preview(it.peerId) }
-    }
-    val orderedContacts = remember(contacts, previews) {
-        contacts.sortedByDescending { previews[it.peerId]?.lastMessage?.timestamp ?: Long.MIN_VALUE }
-    }
-
-    LazyColumn(modifier = modifier.fillMaxSize().padding(horizontal = 16.dp)) {
-        if (contacts.isEmpty()) {
-            item { Text("Nenhuma conversa.", modifier = Modifier.padding(vertical = 24.dp)) }
-        } else {
-            items(orderedContacts, key = { it.peerId }) { contact ->
-                val preview = previews[contact.peerId] ?: ContactPreview(null, 0, false)
-                Row(
-                    modifier = Modifier.fillMaxWidth()
-                        .background(
-                            if (contact.peerId == selectedPeerId) MaterialTheme.colorScheme.secondaryContainer
-                            else MaterialTheme.colorScheme.surface
-                        )
-                        .clickable { onOpen(contact) }
-                        .padding(vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    ProfileAvatar(
-                        profilePhotos.remote(contact.peerId),
-                        contact.displayName,
-                        Modifier.size(48.dp)
-                    )
-                    Spacer(Modifier.size(12.dp))
-                    Column(Modifier.weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                contact.displayName,
-                                modifier = Modifier.weight(1f),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                style = MaterialTheme.typography.titleMedium
-                            )
-                            Spacer(Modifier.size(8.dp))
-                            Text(
-                                contactPresence(preview, clock),
-                                maxLines = 1,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (preview.active) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Text(
-                            preview.lastMessage?.let { (if (it.mine) "Voce: " else "") + it.text }
-                                ?: "Nenhuma mensagem",
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                    }
-                    TextButton(
-                        onClick = { onProfile(contact) },
-                        modifier = Modifier.size(48.dp),
-                        contentPadding = PaddingValues(0.dp)
-                    ) { Text("...") }
-                }
-                HorizontalDivider()
-            }
-        }
-    }
-
-}
-
-@Composable
-private fun AddContactScreen(
-    identity: LocalIdentity,
-    result: String,
-    onImport: (String) -> String,
-    modifier: Modifier
-) {
-    val context = LocalContext.current
-    var scannerError by rememberSaveable { mutableStateOf("") }
-    val qrCode = remember(identity.publicPayload) { qrCode(identity.publicPayload) }
-
-    ScreenColumn(modifier = modifier) {
-        Text("Adicionar contato", style = MaterialTheme.typography.headlineMedium)
-        Spacer(Modifier.height(16.dp))
-        Button(
-            onClick = {
-                val options = GmsBarcodeScannerOptions.Builder()
-                    .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-                    .enableAutoZoom()
-                    .build()
-                GmsBarcodeScanning.getClient(context, options).startScan()
-                    .addOnSuccessListener { code -> onImport(code.rawValue.orEmpty()) }
-                    .addOnFailureListener { scannerError = "Falha no leitor: ${it.message}" }
-            }
-        ) {
-            Text("Escanear contato")
-        }
-        Spacer(Modifier.height(20.dp))
-        Text("Meu contato", style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.height(8.dp))
-        Image(
-            bitmap = qrCode.asImageBitmap(),
-            contentDescription = "QR Code do meu contato",
-            modifier = Modifier.align(Alignment.CenterHorizontally)
-                .widthIn(max = 280.dp)
-                .fillMaxWidth()
-                .aspectRatio(1f)
-        )
-        Spacer(Modifier.height(20.dp))
-        Button(
-            onClick = {
-                context.startActivity(
-                    Intent.createChooser(
-                        Intent(Intent.ACTION_SEND).apply {
-                            type = "text/plain"
-                            putExtra(Intent.EXTRA_TEXT, identity.publicPayload)
-                        },
-                        "Compartilhar meu contato"
-                    )
-                )
-            }
-        ) {
-            Text("Compartilhar meu contato")
-        }
-        Spacer(Modifier.height(12.dp))
-        Button(
-            onClick = {
-                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                val payload = clipboard.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
-                onImport(payload)
-            }
-        ) {
-            Text("Colar e adicionar contato")
-        }
-        Spacer(Modifier.height(12.dp))
-        Text(scannerError.ifBlank { result })
-    }
-}
-
-@Composable
 private fun ContactProfileScreen(
     contact: VerifiedContact?,
     modifier: Modifier,
     onSave: (String, String) -> String,
     onReconnect: () -> Unit,
-    onDelete: (String) -> Unit
+    onDelete: (String, Boolean, Boolean, Boolean) -> Unit
 ) {
     if (contact == null) {
         ScreenColumn(modifier) { Text("Contato nao encontrado.") }
@@ -685,7 +540,8 @@ private fun ContactProfileScreen(
     var name by rememberSaveable(contact.peerId) { mutableStateOf(contact.displayName) }
     var result by rememberSaveable(contact.peerId) { mutableStateOf("") }
     var showPhoto by remember { mutableStateOf(false) }
-    var confirmDelete by remember { mutableStateOf(false) }
+    var removalAction by remember { mutableStateOf<ContactRemovalAction?>(null) }
+    var deleteAttachments by remember { mutableStateOf(true) }
     var clock by remember { mutableStateOf(System.currentTimeMillis()) }
     val listener = remember(contact.peerId) { MessagingRuntime.Listener { snapshot = it } }
 
@@ -784,28 +640,69 @@ private fun ContactProfileScreen(
         )
         Spacer(Modifier.height(20.dp))
         TextButton(
-            onClick = { confirmDelete = true },
+            onClick = { removalAction = ContactRemovalAction.Remove },
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Excluir contato", color = MaterialTheme.colorScheme.error)
+            Text("Remover contato", color = MaterialTheme.colorScheme.error)
+        }
+        TextButton(
+            onClick = { removalAction = ContactRemovalAction.RemoveConversation },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Remover e apagar conversa", color = MaterialTheme.colorScheme.error)
+        }
+        TextButton(
+            onClick = { removalAction = ContactRemovalAction.Block },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Bloquear contato", color = MaterialTheme.colorScheme.error)
         }
     }
 
     if (showPhoto && photo != null) {
         ProfilePhotoDialog(photo, contact.displayName) { showPhoto = false }
     }
-    if (confirmDelete) {
+    removalAction?.let { action ->
         AlertDialog(
-            onDismissRequest = { confirmDelete = false },
-            title = { Text("Excluir contato?") },
-            text = { Text("O historico local sera mantido caso este contato seja adicionado novamente.") },
+            onDismissRequest = { removalAction = null },
+            title = {
+                Text(if (action == ContactRemovalAction.Block) "Bloquear contato?" else "Remover contato?")
+            },
+            text = {
+                Column {
+                    Text(
+                        when (action) {
+                            ContactRemovalAction.Remove -> "A conversa e os arquivos locais serao mantidos."
+                            ContactRemovalAction.RemoveConversation -> "A conversa sera apagada somente deste aparelho."
+                            ContactRemovalAction.Block -> "Novas conexoes e sinalizacoes deste Peer ID serao rejeitadas."
+                        }
+                    )
+                    if (action == ContactRemovalAction.RemoveConversation) {
+                        Spacer(Modifier.height(12.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Apagar anexos e midias", modifier = Modifier.weight(1f))
+                            Switch(checked = deleteAttachments, onCheckedChange = { deleteAttachments = it })
+                        }
+                    }
+                }
+            },
             confirmButton = {
-                TextButton(onClick = { onDelete(contact.peerId) }) {
-                    Text("Excluir", color = MaterialTheme.colorScheme.error)
+                TextButton(onClick = {
+                    onDelete(
+                        contact.peerId,
+                        action == ContactRemovalAction.RemoveConversation,
+                        action == ContactRemovalAction.RemoveConversation && deleteAttachments,
+                        action == ContactRemovalAction.Block
+                    )
+                }) {
+                    Text(
+                        if (action == ContactRemovalAction.Block) "Bloquear" else "Remover",
+                        color = MaterialTheme.colorScheme.error
+                    )
                 }
             },
             dismissButton = {
-                TextButton(onClick = { confirmDelete = false }) { Text("Cancelar") }
+                TextButton(onClick = { removalAction = null }) { Text("Cancelar") }
             }
         )
     }
@@ -1155,6 +1052,7 @@ private fun ProfileScreen(
         Spacer(Modifier.height(28.dp))
         HorizontalDivider()
         Spacer(Modifier.height(20.dp))
+        BlockedContactsSection()
         Text("Atualizacoes", style = MaterialTheme.typography.titleLarge)
         Spacer(Modifier.height(8.dp))
         Text("Versao atual: $versionName")
@@ -1175,7 +1073,7 @@ private fun backupDateTime(timestamp: Long): String =
         java.text.DateFormat.SHORT
     ).format(Date(timestamp))
 
-private fun qrCode(text: String): Bitmap {
+internal fun qrCode(text: String): Bitmap {
     val matrix = QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, 700, 700)
     val pixels = IntArray(matrix.width * matrix.height) { index ->
         if (matrix[index % matrix.width, index / matrix.width]) android.graphics.Color.BLACK
@@ -1211,6 +1109,8 @@ private fun ConversationScreen(
     val composerFocus = remember(contact?.peerId) { FocusRequester() }
     val listState = rememberLazyListState()
     val imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
+    var initialScrollDone by remember(contact?.peerId) { mutableStateOf(false) }
+    var followLatest by remember(contact?.peerId) { mutableStateOf(true) }
     val listener = remember(contact?.peerId) { MessagingRuntime.Listener { snapshot = it } }
     val chooseFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -1252,16 +1152,35 @@ private fun ConversationScreen(
         if (replyToId != null || editingId != null) composerFocus.requestFocus()
     }
     LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.scrollToItem(messages.lastIndex)
+        if (messages.isNotEmpty() && (!initialScrollDone || followLatest)) {
+            listState.scrollToItem(messages.lastIndex)
+            initialScrollDone = true
+        }
     }
     LaunchedEffect(imeBottom) {
-        if (imeBottom > 0 && messages.isNotEmpty()) listState.scrollToItem(messages.lastIndex)
+        if (imeBottom > 0 && followLatest && messages.isNotEmpty()) {
+            delay(80)
+            listState.scrollToItem(messages.lastIndex)
+        }
+    }
+    LaunchedEffect(listState, contact?.peerId, imeBottom) {
+        if (imeBottom == 0) {
+            snapshotFlow {
+                messages.isEmpty() || listState.layoutInfo.visibleItemsInfo.any { it.index == messages.lastIndex }
+            }.collect { followLatest = it }
+        }
     }
     LaunchedEffect(contact?.peerId) {
         while (true) {
             clock = System.currentTimeMillis()
             delay(30_000)
         }
+    }
+
+    BackHandler(enabled = editingId != null || replyToId != null) {
+        if (editingId != null) text = ""
+        editingId = null
+        replyToId = null
     }
 
     Column(modifier = modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
@@ -1461,6 +1380,16 @@ private fun ConversationScreen(
                                             )
                                         }
                                         DropdownMenuItem(
+                                            text = { Text("Copiar") },
+                                            onClick = {
+                                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                                clipboard.setPrimaryClip(
+                                                    ClipData.newPlainText("Mensagem", messagePreview(message))
+                                                )
+                                                messageOptions = null
+                                            }
+                                        )
+                                        DropdownMenuItem(
                                             text = { Text("Excluir para mim") },
                                             onClick = {
                                                 MessagingRuntime.deleteMessage(message.id)
@@ -1598,29 +1527,51 @@ private fun SwipeMessage(
     content: @Composable () -> Unit
 ) {
     var offset by remember(message.id) { mutableStateOf(0f) }
+    var armed by remember(message.id) { mutableStateOf(false) }
     val threshold = with(LocalDensity.current) { 64.dp.toPx() }
-    Box(
-        Modifier.pointerInput(message.id, enabled) {
-            if (!enabled) return@pointerInput
-            detectHorizontalDragGestures(
-                onHorizontalDrag = { change, amount ->
-                    val next = offset + amount
-                    offset = if (message.mine) {
-                        next.coerceIn(-threshold * 1.25f, 0f)
-                    } else {
-                        next.coerceIn(0f, threshold * 1.25f)
-                    }
-                    change.consume()
-                },
-                onDragEnd = {
-                    val triggered = if (message.mine) offset <= -threshold else offset >= threshold
-                    offset = 0f
-                    if (triggered) onSwipe()
-                },
-                onDragCancel = { offset = 0f }
+    val haptics = LocalHapticFeedback.current
+    Box {
+        if (offset != 0f) {
+            Text(
+                "↩",
+                modifier = Modifier.align(if (message.mine) Alignment.CenterEnd else Alignment.CenterStart)
+                    .padding(horizontal = 16.dp),
+                color = if (armed) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant
             )
-        }.graphicsLayer { translationX = offset }
-    ) { content() }
+        }
+        Box(
+            Modifier.pointerInput(message.id, enabled) {
+                if (!enabled) return@pointerInput
+                detectHorizontalDragGestures(
+                    onHorizontalDrag = { change, amount ->
+                        val next = offset + amount
+                        offset = if (message.mine) {
+                            next.coerceIn(-threshold * 1.25f, 0f)
+                        } else {
+                            next.coerceIn(0f, threshold * 1.25f)
+                        }
+                        val reached = if (message.mine) offset <= -threshold else offset >= threshold
+                        if (reached && !armed) {
+                            armed = true
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        }
+                        change.consume()
+                    },
+                    onDragEnd = {
+                        val triggered = armed
+                        offset = 0f
+                        armed = false
+                        if (triggered) onSwipe()
+                    },
+                    onDragCancel = {
+                        offset = 0f
+                        armed = false
+                    }
+                )
+            }.graphicsLayer { translationX = offset }
+        ) { content() }
+    }
 }
 
 @Composable
@@ -1662,7 +1613,7 @@ private fun AttachmentPreview(attachment: com.mensageiro.core.crypto.StoredAttac
 }
 
 @Composable
-private fun ProfileAvatar(photo: StoredAttachment?, name: String, modifier: Modifier = Modifier) {
+internal fun ProfileAvatar(photo: StoredAttachment?, name: String, modifier: Modifier = Modifier) {
     val bitmap by produceState<Bitmap?>(null, photo?.localPath, photo?.sha256) {
         value = withContext(Dispatchers.IO) { photo?.let { decodePreview(it.localPath) } }
     }
@@ -1754,7 +1705,7 @@ private fun messageStatus(status: MessageStatus): String = when (status) {
     MessageStatus.READ -> "Vista"
 }
 
-private fun contactPresence(preview: ContactPreview, now: Long): String = when {
+internal fun contactPresence(preview: ContactPreview, now: Long): String = when {
     preview.active -> "online"
     preview.lastOnline > 0 -> "visto ha ${elapsedTime(now - preview.lastOnline)}"
     else -> "offline"
@@ -1770,7 +1721,7 @@ private fun elapsedTime(milliseconds: Long): String {
 }
 
 @Composable
-private fun ScreenColumn(
+internal fun ScreenColumn(
     modifier: Modifier = Modifier,
     verticalArrangement: Arrangement.Vertical = Arrangement.Top,
     horizontalAlignment: Alignment.Horizontal = Alignment.Start,
@@ -1791,6 +1742,8 @@ private fun ScreenColumn(
 }
 
 private enum class DriveAction { Enable, Restore }
+
+private enum class ContactRemovalAction { Remove, RemoveConversation, Block }
 
 private enum class Screen(val title: String) {
     Contacts("Contatos"),

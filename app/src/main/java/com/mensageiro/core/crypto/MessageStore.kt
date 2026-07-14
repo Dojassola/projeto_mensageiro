@@ -126,6 +126,30 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
         return message
     }
 
+    @Synchronized
+    fun deleteConversation(peerId: String): List<StoredMessage> {
+        val removed = messages.values.filter { it.contactPeerId == peerId }
+        if (removed.isEmpty()) return emptyList()
+        val messageEditor = prefs.edit()
+        val deletedEditor = deletedPrefs.edit()
+        val deletedAt = System.currentTimeMillis()
+        removed.forEach {
+            messages.remove(it.id)
+            messageEditor.remove(it.id)
+            deletedEditor.putLong(it.id, deletedAt)
+        }
+        messageEditor.apply()
+        deletedEditor.apply()
+        presence.edit().remove(peerId).apply()
+        remoteDeletions(peerId).takeIf { it.isNotEmpty() }?.let { deletions ->
+            val editor = remoteDeletionPrefs.edit()
+            deletions.forEach { editor.remove(it.id) }
+            editor.apply()
+        }
+        AutomaticBackup.request(context)
+        return removed
+    }
+
     fun deletedIds(): Set<String> = deletedPrefs.all.keys
 
     fun remoteDeletions(peerId: String): List<MessageDeletion> = remoteDeletionPrefs.all.mapNotNull { (id, value) ->

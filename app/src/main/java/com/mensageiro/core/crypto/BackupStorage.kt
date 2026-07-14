@@ -39,17 +39,22 @@ object DriveBackupStorage {
     fun upload(accessToken: String, backup: String) {
         val bytes = backup.toByteArray(StandardCharsets.UTF_8)
         require(bytes.size <= MaxBackupBytes) { "Backup muito grande para o Google Drive." }
-        val fileId = findFile(accessToken)
-        val endpoint = if (fileId == null) {
-            "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable"
-        } else {
-            "https://www.googleapis.com/upload/drive/v3/files/$fileId?uploadType=resumable"
+        val previousFiles = findFiles(accessToken)
+        val newFileId = uploadNew(accessToken, bytes)
+        previousFiles.filterNot { it == newFileId }.forEach { fileId ->
+            runCatching {
+                request("https://www.googleapis.com/drive/v3/files/$fileId", "DELETE", accessToken) {
+                    if (responseCode != HttpURLConnection.HTTP_NOT_FOUND) requireSuccess(this)
+                }
+            }
         }
-        val metadata = if (fileId == null) {
-            JSONObject().put("name", FileName).put("parents", listOf("appDataFolder"))
-        } else JSONObject()
+    }
+
+    private fun uploadNew(accessToken: String, bytes: ByteArray): String {
+        val endpoint = "https://www.googleapis.com/upload/drive/v3/files" +
+            "?uploadType=resumable&fields=id"
+        val metadata = JSONObject().put("name", FileName).put("parents", listOf("appDataFolder"))
         val location = request(endpoint, "POST", accessToken) {
-            if (fileId != null) setRequestProperty("X-HTTP-Method-Override", "PATCH")
             setRequestProperty("Content-Type", "application/json; charset=UTF-8")
             setRequestProperty("X-Upload-Content-Type", "application/json")
             setRequestProperty("X-Upload-Content-Length", bytes.size.toString())
@@ -58,34 +63,37 @@ object DriveBackupStorage {
             requireSuccess(this)
             requireNotNull(getHeaderField("Location")) { "O Google Drive nao iniciou o envio." }
         }
-        request(location, "PUT", accessToken) {
+        return request(location, "PUT", accessToken) {
             setRequestProperty("Content-Type", "application/json")
             setFixedLengthStreamingMode(bytes.size)
             doOutput = true
             outputStream.use { it.write(bytes) }
             requireSuccess(this)
+            JSONObject(inputStream.bufferedReader().use { it.readText() }).getString("id")
         }
     }
 
     fun download(accessToken: String): String {
-        val fileId = findFile(accessToken) ?: error("Nenhum backup encontrado no Google Drive.")
+        val fileId = findFiles(accessToken).firstOrNull()
+            ?: error("Nenhum backup encontrado no Google Drive.")
         return request("https://www.googleapis.com/drive/v3/files/$fileId?alt=media", "GET", accessToken) {
             requireSuccess(this)
             readLimited(inputStream, MaxBackupBytes).toString(StandardCharsets.UTF_8)
         }
     }
 
-    private fun findFile(accessToken: String): String? {
+    private fun findFiles(accessToken: String): List<String> {
         val query = URLEncoder.encode(
             "name = '$FileName' and 'appDataFolder' in parents",
             StandardCharsets.UTF_8.name()
         )
         val url = "https://www.googleapis.com/drive/v3/files" +
-            "?spaces=appDataFolder&pageSize=1&orderBy=modifiedTime%20desc&fields=files(id)&q=$query"
+            "?spaces=appDataFolder&pageSize=100&orderBy=modifiedTime%20desc" +
+            "&fields=files(id)&q=$query"
         return request(url, "GET", accessToken) {
             requireSuccess(this)
             val files = JSONObject(inputStream.bufferedReader().use { it.readText() }).getJSONArray("files")
-            if (files.length() == 0) null else files.getJSONObject(0).getString("id")
+            (0 until files.length()).map { files.getJSONObject(it).getString("id") }
         }
     }
 

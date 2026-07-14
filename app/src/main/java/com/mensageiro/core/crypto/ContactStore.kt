@@ -2,15 +2,20 @@ package com.mensageiro.core.crypto
 
 import android.content.Context
 
+data class BlockedContact(val peerId: String, val displayName: String, val blockedAt: Long)
+
 class ContactStore(context: Context) {
     private val context = context.applicationContext
     private val prefs = this.context.getSharedPreferences("contacts", Context.MODE_PRIVATE)
+    private val blocklist = this.context.getSharedPreferences("blocked_contacts", Context.MODE_PRIVATE)
 
     fun all(): List<VerifiedContact> =
         prefs.all.values.mapNotNull { it as? String }.mapNotNull(::decode)
+            .filterNot { isBlocked(it.peerId) }
 
     fun importContact(payload: String, localPublicKey: String): VerifiedContact {
         val contact = CryptoText.verifyContact(payload.trim(), localPublicKey)
+        require(!isBlocked(contact.peerId)) { "Este contato esta bloqueado. Desbloqueie-o no seu perfil." }
         prefs.edit()
             .putString(contact.peerId, encode(contact))
             .apply()
@@ -34,6 +39,27 @@ class ContactStore(context: Context) {
         prefs.edit().remove(peerId).apply()
         AutomaticBackup.request(context)
     }
+
+    fun block(contact: VerifiedContact) {
+        blocklist.edit().putString(
+            contact.peerId,
+            "${System.currentTimeMillis()}\n${contact.displayName}"
+        ).apply()
+        prefs.edit().remove(contact.peerId).apply()
+        AutomaticBackup.request(context)
+    }
+
+    fun unblock(peerId: String) {
+        blocklist.edit().remove(peerId).apply()
+        AutomaticBackup.request(context)
+    }
+
+    fun isBlocked(peerId: String): Boolean = blocklist.contains(peerId)
+
+    fun blocked(): List<BlockedContact> = blocklist.all.mapNotNull { (peerId, value) ->
+        val parts = (value as? String)?.split('\n', limit = 2) ?: return@mapNotNull null
+        BlockedContact(peerId, parts.getOrElse(1) { peerId.take(12) }, parts[0].toLongOrNull() ?: 0)
+    }.sortedByDescending { it.blockedAt }
 
     fun updateSharePayload(peerId: String, payload: String, localPublicKey: String): VerifiedContact {
         val shared = CryptoText.verifyContact(payload.trim(), localPublicKey)
@@ -69,7 +95,7 @@ class ContactStore(context: Context) {
     }
 
     fun replaceAll(contacts: List<VerifiedContact>, localPublicKey: String) {
-        val valid = validateForRestore(contacts, localPublicKey)
+        val valid = validateForRestore(contacts, localPublicKey).filterNot { isBlocked(it.peerId) }
         val editor = prefs.edit().clear()
         valid.forEach { editor.putString(it.peerId, encode(it)) }
         editor.apply()
