@@ -12,3 +12,9 @@ tasks.register<Copy>("buildCompleto") {
     into(layout.buildDirectory.dir("distribuicao"))
     rename { "Mensageiro.apk" }
 }
+
+tasks.register("apk") {
+    group = "build"
+    description = "Atalho para gerar build/distribuicao/Mensageiro.apk."
+    dependsOn("buildCompleto")
+}

@@ -29,6 +29,12 @@ class ContactStore(context: Context) {
         return contact
     }
 
+    fun remove(peerId: String) {
+        require(peerId in prefs) { "Contato nao encontrado." }
+        prefs.edit().remove(peerId).apply()
+        AutomaticBackup.request(context)
+    }
+
     fun updateSharePayload(peerId: String, payload: String, localPublicKey: String): VerifiedContact {
         val shared = CryptoText.verifyContact(payload.trim(), localPublicKey)
         val contact = requireNotNull(all().firstOrNull { it.peerId == peerId }) { "Contato nao encontrado." }

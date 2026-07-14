@@ -36,12 +36,14 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.size
@@ -53,6 +55,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -92,6 +96,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.PopupProperties
 import com.mensageiro.core.crypto.ContactStore
 import com.mensageiro.core.crypto.BackupManager
 import com.mensageiro.core.crypto.AutomaticBackup
@@ -250,6 +255,14 @@ fun MensageiroApp(incomingMessage: String? = null, onMessageConsumed: () -> Unit
         return contactStatus
     }
 
+    fun deleteContact(peerId: String) {
+        contactStore.remove(peerId)
+        contacts = contactStore.all()
+        selectedPeerId = contacts.firstOrNull()?.peerId
+        MessagingRuntime.start(context)
+        screen = Screen.Contacts
+    }
+
     fun goBack() {
         screen = if (screen == Screen.ContactProfile && contacts.any { it.peerId == selectedPeerId }) {
             Screen.Conversation
@@ -332,7 +345,8 @@ fun MensageiroApp(incomingMessage: String? = null, onMessageConsumed: () -> Unit
                     contact = contacts.firstOrNull { it.peerId == selectedPeerId },
                     modifier = Modifier.padding(innerPadding),
                     onSave = ::renameContact,
-                    onReconnect = MessagingRuntime::reconnect
+                    onReconnect = MessagingRuntime::reconnect,
+                    onDelete = ::deleteContact
                 )
             }
         }
@@ -518,12 +532,15 @@ private fun ContactsScreen(
     val previews = remember(contacts, revision, clock) {
         contacts.associate { it.peerId to MessagingRuntime.preview(it.peerId) }
     }
+    val orderedContacts = remember(contacts, previews) {
+        contacts.sortedByDescending { previews[it.peerId]?.lastMessage?.timestamp ?: Long.MIN_VALUE }
+    }
 
     LazyColumn(modifier = modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         if (contacts.isEmpty()) {
             item { Text("Nenhuma conversa.", modifier = Modifier.padding(vertical = 24.dp)) }
         } else {
-            items(contacts, key = { it.peerId }) { contact ->
+            items(orderedContacts, key = { it.peerId }) { contact ->
                 val preview = previews[contact.peerId] ?: ContactPreview(null, 0, false)
                 Row(
                     modifier = Modifier.fillMaxWidth()
@@ -655,7 +672,8 @@ private fun ContactProfileScreen(
     contact: VerifiedContact?,
     modifier: Modifier,
     onSave: (String, String) -> String,
-    onReconnect: () -> Unit
+    onReconnect: () -> Unit,
+    onDelete: (String) -> Unit
 ) {
     if (contact == null) {
         ScreenColumn(modifier) { Text("Contato nao encontrado.") }
@@ -667,6 +685,7 @@ private fun ContactProfileScreen(
     var name by rememberSaveable(contact.peerId) { mutableStateOf(contact.displayName) }
     var result by rememberSaveable(contact.peerId) { mutableStateOf("") }
     var showPhoto by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
     var clock by remember { mutableStateOf(System.currentTimeMillis()) }
     val listener = remember(contact.peerId) { MessagingRuntime.Listener { snapshot = it } }
 
@@ -763,10 +782,32 @@ private fun ContactProfileScreen(
             color = if (snapshot.connected) MaterialTheme.colorScheme.primary
             else MaterialTheme.colorScheme.onSurfaceVariant
         )
+        Spacer(Modifier.height(20.dp))
+        TextButton(
+            onClick = { confirmDelete = true },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Excluir contato", color = MaterialTheme.colorScheme.error)
+        }
     }
 
     if (showPhoto && photo != null) {
         ProfilePhotoDialog(photo, contact.displayName) { showPhoto = false }
+    }
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Excluir contato?") },
+            text = { Text("O historico local sera mantido caso este contato seja adicionado novamente.") },
+            confirmButton = {
+                TextButton(onClick = { onDelete(contact.peerId) }) {
+                    Text("Excluir", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = false }) { Text("Cancelar") }
+            }
+        )
     }
 }
 
@@ -1169,6 +1210,7 @@ private fun ConversationScreen(
     var clock by remember { mutableStateOf(System.currentTimeMillis()) }
     val composerFocus = remember(contact?.peerId) { FocusRequester() }
     val listState = rememberLazyListState()
+    val imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
     val listener = remember(contact?.peerId) { MessagingRuntime.Listener { snapshot = it } }
     val chooseFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -1210,7 +1252,10 @@ private fun ConversationScreen(
         if (replyToId != null || editingId != null) composerFocus.requestFocus()
     }
     LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+        if (messages.isNotEmpty()) listState.scrollToItem(messages.lastIndex)
+    }
+    LaunchedEffect(imeBottom) {
+        if (imeBottom > 0 && messages.isNotEmpty()) listState.scrollToItem(messages.lastIndex)
     }
     LaunchedEffect(contact?.peerId) {
         while (true) {
@@ -1318,10 +1363,8 @@ private fun ConversationScreen(
                             ) {
                                 SwipeMessage(
                                     message = message,
-                                    enabled = !message.mine || message.attachment == null,
-                                    onSwipe = {
-                                        if (message.mine) startEdit(message) else startReply(message)
-                                    }
+                                    enabled = true,
+                                    onSwipe = { startReply(message) }
                                 ) {
                                     Card(
                                         Modifier.widthIn(min = 72.dp, max = bubbleWidth).combinedClickable(
@@ -1394,6 +1437,57 @@ private fun ConversationScreen(
                                                     )
                                                 }
                                             }
+                                        }
+                                    }
+                                    DropdownMenu(
+                                        expanded = messageOptions?.id == message.id,
+                                        onDismissRequest = { messageOptions = null },
+                                        properties = PopupProperties(focusable = false)
+                                    ) {
+                                        DropdownMenuItem(
+                                            text = { Text("Responder") },
+                                            onClick = {
+                                                startReply(message)
+                                                messageOptions = null
+                                            }
+                                        )
+                                        if (message.mine && message.attachment == null) {
+                                            DropdownMenuItem(
+                                                text = { Text("Editar") },
+                                                onClick = {
+                                                    startEdit(message)
+                                                    messageOptions = null
+                                                }
+                                            )
+                                        }
+                                        DropdownMenuItem(
+                                            text = { Text("Excluir para mim") },
+                                            onClick = {
+                                                MessagingRuntime.deleteMessage(message.id)
+                                                if (editingId == message.id) {
+                                                    editingId = null
+                                                    text = ""
+                                                }
+                                                if (replyToId == message.id) replyToId = null
+                                                messageOptions = null
+                                            }
+                                        )
+                                        if (message.mine) {
+                                            DropdownMenuItem(
+                                                text = { Text("Excluir para todos") },
+                                                onClick = {
+                                                    val error = MessagingRuntime.deleteMessageForEveryone(message.id)
+                                                    fileStatus = error
+                                                    if (error.isBlank()) {
+                                                        if (editingId == message.id) {
+                                                            editingId = null
+                                                            text = ""
+                                                        }
+                                                        if (replyToId == message.id) replyToId = null
+                                                        messageOptions = null
+                                                    }
+                                                }
+                                            )
                                         }
                                     }
                                 }
@@ -1494,52 +1588,6 @@ private fun ConversationScreen(
         }
     }
 
-    messageOptions?.let { message ->
-        AlertDialog(
-            onDismissRequest = { messageOptions = null },
-            title = { Text("Mensagem") },
-            text = {
-                Column {
-                    TextButton(onClick = {
-                        startReply(message)
-                        messageOptions = null
-                    }) { Text("Responder") }
-                    if (message.mine && message.attachment == null) {
-                        TextButton(onClick = {
-                            startEdit(message)
-                            messageOptions = null
-                        }) { Text("Editar") }
-                    }
-                    TextButton(onClick = {
-                        MessagingRuntime.deleteMessage(message.id)
-                        if (editingId == message.id) {
-                            editingId = null
-                            text = ""
-                        }
-                        if (replyToId == message.id) replyToId = null
-                        messageOptions = null
-                    }) { Text("Excluir para mim") }
-                    if (message.mine) {
-                        TextButton(onClick = {
-                            val error = MessagingRuntime.deleteMessageForEveryone(message.id)
-                            fileStatus = error
-                            if (error.isBlank()) {
-                                if (editingId == message.id) {
-                                    editingId = null
-                                    text = ""
-                                }
-                                if (replyToId == message.id) replyToId = null
-                                messageOptions = null
-                            }
-                        }) { Text("Excluir para todos") }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { messageOptions = null }) { Text("Cancelar") }
-            }
-        )
-    }
 }
 
 @Composable
