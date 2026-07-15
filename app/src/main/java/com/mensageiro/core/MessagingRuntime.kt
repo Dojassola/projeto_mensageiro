@@ -5,6 +5,7 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import com.mensageiro.app.MensageiroApplication
 import com.mensageiro.core.crypto.AttachmentStore
 import com.mensageiro.core.crypto.AutomaticBackup
 import com.mensageiro.core.crypto.ContactStore
@@ -65,9 +66,10 @@ object MessagingRuntime {
     @Synchronized
     fun start(source: Context) {
         val app = source.applicationContext
+        val container = (app as? MensageiroApplication)?.container
         context = app
-        if (identityStore == null) identityStore = IdentityStore(app)
-        if (messageStore == null) messageStore = MessageStore(app, identityStore!!)
+        if (identityStore == null) identityStore = container?.identityStore ?: IdentityStore(app)
+        if (messageStore == null) messageStore = container?.messageStore ?: MessageStore(app, identityStore!!)
         AutomaticBackup.resume(app)
 
         val identity = identityStore!!.getOrCreate()
@@ -104,8 +106,8 @@ object MessagingRuntime {
     }
 
     @Synchronized
-    fun reconnect() {
-        sessions[selectedPeerId]?.messenger?.connect()
+    fun reconnect(peerId: String) {
+        sessions[peerId]?.messenger?.connect()
     }
 
     @Synchronized
@@ -128,11 +130,11 @@ object MessagingRuntime {
     }
 
     @Synchronized
-    fun send(text: String, replyToId: String? = null) {
-        val session = sessions[selectedPeerId] ?: return
+    fun send(peerId: String, text: String, replyToId: String? = null) {
+        val session = sessions[peerId] ?: return
         val store = messageStore ?: return
         val reply = replyToId?.takeIf { id ->
-            store.forContact(session.contact.peerId).any { it.id == id && !it.system }
+            store.get(id)?.let { it.contactPeerId == session.contact.peerId && !it.system } == true
         }
         val message = StoredMessage(
             UUID.randomUUID().toString(), session.contact.peerId, true, MessageStatus.PENDING, false,
@@ -144,8 +146,8 @@ object MessagingRuntime {
     }
 
     @Synchronized
-    fun sendFile(messageId: String, attachment: StoredAttachment) {
-        val session = sessions[selectedPeerId] ?: return
+    fun sendFile(peerId: String, messageId: String, attachment: StoredAttachment) {
+        val session = sessions[peerId] ?: return
         val store = messageStore ?: return
         val message = StoredMessage(
             messageId,
@@ -163,20 +165,21 @@ object MessagingRuntime {
     }
 
     @Synchronized
-    fun deleteMessage(id: String) {
+    fun deleteMessage(peerId: String, id: String) {
         val store = messageStore ?: return
-        val message = store.delete(id) ?: return
+        val message = store.get(id)?.takeIf { it.contactPeerId == peerId } ?: return
+        store.delete(id)
         context?.let { AttachmentStore(it).delete(id, message.attachment) }
         sessions[message.contactPeerId]?.messenger?.cancelFile(id)
         dispatch()
     }
 
     @Synchronized
-    fun editMessage(id: String, text: String): String {
-        val session = sessions[selectedPeerId] ?: return "Contato indisponivel."
+    fun editMessage(peerId: String, id: String, text: String): String {
+        val session = sessions[peerId] ?: return "Contato indisponivel."
         val store = messageStore ?: return "Mensagens indisponiveis."
-        val message = store.forContact(session.contact.peerId)
-            .firstOrNull { it.id == id && it.mine && !it.system && it.attachment == null }
+        val message = store.get(id)
+            ?.takeIf { it.contactPeerId == session.contact.peerId && it.mine && !it.system && it.attachment == null }
             ?: return "Esta mensagem nao pode ser editada."
         val edited = runCatching { store.edit(message.id, text, System.currentTimeMillis()) }
             .getOrElse { return "Texto invalido." }
@@ -187,10 +190,10 @@ object MessagingRuntime {
     }
 
     @Synchronized
-    fun deleteMessageForEveryone(id: String): String {
-        val session = sessions[selectedPeerId] ?: return "Contato indisponivel."
+    fun deleteMessageForEveryone(peerId: String, id: String): String {
+        val session = sessions[peerId] ?: return "Contato indisponivel."
         val store = messageStore ?: return "Mensagens indisponiveis."
-        val message = store.forContact(session.contact.peerId).firstOrNull { it.id == id && it.mine }
+        val message = store.get(id)?.takeIf { it.contactPeerId == session.contact.peerId && it.mine }
             ?: return "Somente mensagens enviadas por voce podem ser excluidas para todos."
         val deletedAt = System.currentTimeMillis()
         session.messenger?.sendDelete(id, deletedAt)
@@ -349,8 +352,8 @@ object MessagingRuntime {
                 replyToId = replyToId
             )
         )
-        val savedStatus = store.forContact(session.contact.peerId)
-            .firstOrNull { it.id == received.id }?.status
+        val savedStatus = store.get(received.id)
+            ?.takeIf { it.contactPeerId == session.contact.peerId }?.status
         session.messenger?.sendReceipt(
             received.id,
             if (savedStatus == MessageStatus.READ) MessageStatus.READ else MessageStatus.DELIVERED
@@ -369,8 +372,8 @@ object MessagingRuntime {
     private fun onMessageAction(session: Session, action: MessageAction) {
         if (!isCurrent(session)) return
         val store = messageStore ?: return
-        val message = store.forContact(session.contact.peerId)
-            .firstOrNull { it.id == action.targetId }
+        val message = store.get(action.targetId)
+            ?.takeIf { it.contactPeerId == session.contact.peerId }
         when (action.type) {
             MessageActionType.EDIT -> {
                 if (message != null && !message.mine && !message.system && message.attachment == null &&
@@ -403,7 +406,7 @@ object MessagingRuntime {
     private fun onReceipt(session: Session, id: String, status: MessageStatus) {
         if (!isCurrent(session)) return
         val store = messageStore ?: return
-        val message = store.forContact(session.contact.peerId).firstOrNull { it.id == id && it.mine } ?: return
+        val message = store.get(id)?.takeIf { it.contactPeerId == session.contact.peerId && it.mine } ?: return
         store.markStatus(message.id, status)
         dispatch()
     }
@@ -459,8 +462,8 @@ object MessagingRuntime {
     @Synchronized
     private fun onFileRequested(session: Session, id: String, offset: Long) {
         if (!isCurrent(session)) return
-        val message = messageStore?.forContact(session.contact.peerId)
-            ?.firstOrNull { it.id == id && it.mine && it.attachment?.complete == true }
+        val message = messageStore?.get(id)
+            ?.takeIf { it.contactPeerId == session.contact.peerId && it.mine && it.attachment?.complete == true }
         if (message != null) {
             session.messenger?.sendFileChunk(message, offset)
             return
@@ -476,7 +479,7 @@ object MessagingRuntime {
         if (!isCurrent(session)) return
         val app = context ?: return
         val store = messageStore ?: return
-        store.forContact(session.contact.peerId).firstOrNull { it.id == id } ?: return
+        store.get(id)?.takeIf { it.contactPeerId == session.contact.peerId } ?: return
         store.updateAttachment(id, attachment)
         store.markStatus(id, MessageStatus.DELIVERED)
         session.messenger?.sendReceipt(id, MessageStatus.DELIVERED)

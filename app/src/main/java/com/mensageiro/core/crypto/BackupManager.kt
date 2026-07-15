@@ -16,11 +16,13 @@ import javax.crypto.spec.SecretKeySpec
 
 data class RestoreResult(val contacts: Int, val messages: Int)
 
-class BackupManager(context: Context) {
-    private val identityStore = IdentityStore(context)
-    private val contactStore = ContactStore(context)
-    private val messageStore = MessageStore(context, identityStore)
-    private val profilePhotoStore = ProfilePhotoStore(context)
+class BackupManager(
+    context: Context,
+    private val identityStore: IdentityStore = IdentityStore(context),
+    private val contactStore: ContactStore = ContactStore(context),
+    private val messageStore: MessageStore = MessageStore(context, identityStore),
+    private val profilePhotoStore: ProfilePhotoStore = ProfilePhotoStore(context)
+) {
 
     fun export(password: String): String {
         validatePassword(password)

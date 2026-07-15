@@ -28,8 +28,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.mensageiro.ProfileAvatar
-import com.mensageiro.contactPresence
+import com.mensageiro.ui.common.ProfileAvatar
+import com.mensageiro.ui.common.contactPresence
 import com.mensageiro.core.ContactPreview
 import com.mensageiro.core.MessagingRuntime
 import com.mensageiro.core.crypto.ProfilePhotoStore
@@ -39,13 +39,12 @@ import kotlinx.coroutines.delay
 @Composable
 internal fun ContactsScreen(
     contacts: List<VerifiedContact>,
+    profilePhotos: ProfilePhotoStore,
     modifier: Modifier,
     selectedPeerId: String? = null,
     onOpen: (VerifiedContact) -> Unit,
     onProfile: (VerifiedContact) -> Unit
 ) {
-    val context = LocalContext.current
-    val profilePhotos = remember { ProfilePhotoStore(context) }
     var revision by remember { mutableStateOf(0) }
     var clock by remember { mutableStateOf(System.currentTimeMillis()) }
     val listener = remember { MessagingRuntime.Listener { revision++ } }

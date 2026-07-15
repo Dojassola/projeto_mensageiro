@@ -46,13 +46,19 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
                 .onSuccess { put(id, it) }
         }
     }
+    private val messageOrder = compareBy<StoredMessage>({ it.timestamp }, { it.id })
+    private val conversations = messages.values.groupBy { it.contactPeerId }
+        .mapValuesTo(HashMap()) { (_, values) -> values.sortedWith(messageOrder) }
 
     @Synchronized
     fun forContact(peerId: String): List<StoredMessage> =
-        messages.values.filter { it.contactPeerId == peerId }.sortedBy { it.timestamp }
+        conversations[peerId].orEmpty()
 
     @Synchronized
     fun all(): List<StoredMessage> = messages.values.sortedBy { it.timestamp }
+
+    @Synchronized
+    fun get(id: String): StoredMessage? = messages[id]
 
     @Synchronized
     fun add(message: StoredMessage): Boolean {
@@ -63,26 +69,28 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
 
     @Synchronized
     fun save(message: StoredMessage) {
-        messages[message.id] = message
+        messages.put(message.id, message)?.takeIf { it.contactPeerId != message.contactPeerId }
+            ?.let(::removeFromConversation)
+        upsertConversation(message)
         prefs.edit().putString(message.id, identityStore.protect(encode(message))).apply()
         AutomaticBackup.request(context)
     }
 
     @Synchronized
     fun markStatus(id: String, status: MessageStatus) {
-        val message = messages[id] ?: return
+        val message = get(id) ?: return
         if (status.ordinal > message.status.ordinal) save(message.copy(status = status))
     }
 
     @Synchronized
     fun updateAttachment(id: String, attachment: StoredAttachment) {
-        val message = messages[id] ?: return
+        val message = get(id) ?: return
         save(message.copy(attachment = attachment))
     }
 
     @Synchronized
     fun edit(id: String, text: String, editedAt: Long): StoredMessage? {
-        val message = messages[id] ?: return null
+        val message = get(id) ?: return null
         val body = text.trim()
         require(!message.system && message.attachment == null && body.isNotEmpty() && body.length <= 4_000)
         require(editedAt > message.editedAt)
@@ -91,7 +99,7 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
 
     @Synchronized
     fun mergeSynced(message: StoredMessage): Boolean {
-        val current = messages[message.id] ?: return add(message)
+        val current = get(message.id) ?: return add(message)
         val status = if (message.status.ordinal > current.status.ordinal) message.status else current.status
         val newerEdit = message.editedAt > current.editedAt
         if (!newerEdit && status == current.status) return false
@@ -113,6 +121,7 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
         deletedAt: Long = System.currentTimeMillis()
     ): StoredMessage? {
         val message = messages.remove(id)
+        message?.let(::removeFromConversation)
         if (message == null && deletedPrefs.getLong(id, 0) >= deletedAt) return null
         prefs.edit().remove(id).apply()
         deletedPrefs.edit().putLong(id, deletedAt).apply()
@@ -140,6 +149,7 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
         }
         messageEditor.apply()
         deletedEditor.apply()
+        conversations.remove(peerId)
         presence.edit().remove(peerId).apply()
         remoteDeletions(peerId).takeIf { it.isNotEmpty() }?.let { deletions ->
             val editor = remoteDeletionPrefs.edit()
@@ -166,7 +176,7 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
         editor.apply()
         val messageEditor = prefs.edit()
         ids.forEach {
-            messages.remove(it)
+            messages.remove(it)?.let(::removeFromConversation)
             messageEditor.remove(it)
         }
         messageEditor.apply()
@@ -191,6 +201,9 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
         editor.apply()
         this.messages.clear()
         messages.associateByTo(this.messages) { it.id }
+        conversations.clear()
+        messages.groupBy { it.contactPeerId }
+            .mapValuesTo(conversations) { (_, values) -> values.sortedWith(messageOrder) }
         AutomaticBackup.request(context)
     }
 
@@ -198,6 +211,23 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
 
     fun markOnline(peerId: String, timestamp: Long = System.currentTimeMillis()) {
         presence.edit().putLong(peerId, timestamp).apply()
+    }
+
+    private fun upsertConversation(message: StoredMessage) {
+        val current = conversations[message.contactPeerId].orEmpty()
+        val updated = current.toMutableList()
+        val existing = updated.indexOfFirst { it.id == message.id }
+        if (existing >= 0) updated.removeAt(existing)
+        val index = updated.binarySearch(message, messageOrder).let { if (it >= 0) it else -it - 1 }
+        updated.add(index, message)
+        conversations[message.contactPeerId] = updated
+    }
+
+    private fun removeFromConversation(message: StoredMessage) {
+        val current = conversations[message.contactPeerId] ?: return
+        val updated = current.filterNot { it.id == message.id }
+        if (updated.isEmpty()) conversations.remove(message.contactPeerId)
+        else conversations[message.contactPeerId] = updated
     }
 
     private fun encode(message: StoredMessage): String {

@@ -25,9 +25,9 @@ import androidx.compose.ui.unit.dp
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
-import com.mensageiro.ScreenColumn
+import com.mensageiro.ui.common.ScreenColumn
 import com.mensageiro.core.crypto.LocalIdentity
-import com.mensageiro.qrCode
+import com.mensageiro.navigation.qrCode
 
 @Composable
 internal fun AddContactScreen(

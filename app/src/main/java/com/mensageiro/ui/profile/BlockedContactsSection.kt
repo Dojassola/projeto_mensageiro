@@ -22,9 +22,7 @@ import androidx.compose.ui.unit.dp
 import com.mensageiro.core.crypto.ContactStore
 
 @Composable
-internal fun BlockedContactsSection() {
-    val context = LocalContext.current
-    val store = remember { ContactStore(context) }
+internal fun BlockedContactsSection(store: ContactStore) {
     var contacts by remember { mutableStateOf(store.blocked()) }
     if (contacts.isEmpty()) return
 
