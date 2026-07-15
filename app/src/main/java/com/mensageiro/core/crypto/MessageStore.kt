@@ -83,6 +83,28 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
     }
 
     @Synchronized
+    fun markConversationRead(peerId: String): List<StoredMessage> {
+        val current = conversations[peerId].orEmpty()
+        val changed = current.filter {
+            !it.mine && !it.system && it.status != MessageStatus.READ &&
+                (it.attachment == null || it.attachment.complete)
+        }
+        if (changed.isEmpty()) return emptyList()
+        val changedIds = changed.mapTo(HashSet()) { it.id }
+        val editor = prefs.edit()
+        val updated = current.map { message ->
+            if (message.id !in changedIds) message else message.copy(status = MessageStatus.READ).also {
+                messages[it.id] = it
+                editor.putString(it.id, identityStore.protect(encode(it)))
+            }
+        }
+        conversations[peerId] = updated
+        editor.apply()
+        AutomaticBackup.request(context)
+        return updated.filter { it.id in changedIds }
+    }
+
+    @Synchronized
     fun updateAttachment(id: String, attachment: StoredAttachment) {
         val message = get(id) ?: return
         save(message.copy(attachment = attachment))

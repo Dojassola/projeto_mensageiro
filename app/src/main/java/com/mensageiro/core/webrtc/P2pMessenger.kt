@@ -63,6 +63,7 @@ class P2pMessenger(
     private val onFileComplete: (String, StoredAttachment) -> Unit,
     private val onProfilePhoto: (StoredAttachment?) -> Unit,
     private val onContactPayload: (String) -> Unit,
+    private val onCallControl: (CallControl) -> Unit,
     private val isBlocked: () -> Boolean,
     private val isAppVisible: () -> Boolean
 ) {
@@ -212,6 +213,26 @@ class P2pMessenger(
                 val presence = PresenceCodec.create(identity, contact, active, identityStore::sign)
                 check(sendPacket(activeChannel, "P|$presence")) { "Falha ao enviar presenca." }
             }.onFailure { state("Falha na presenca: ${it.message}", true) }
+        }
+    }
+
+    fun sendCallControl(control: CallControl) {
+        if (closed) return
+        executor.execute {
+            val activeChannel = channel
+            if (activeChannel?.state() != DataChannel.State.OPEN) return@execute
+            runCatching {
+                val payload = MessageCodec.create(
+                    identity,
+                    contact,
+                    CallControlCodec.encode(control),
+                    UUID.randomUUID().toString(),
+                    control.timestamp,
+                    identityStore::sign,
+                    maxLength = 2_000
+                )
+                check(sendPacket(activeChannel, "L|$payload")) { "Falha ao enviar controle de chamada." }
+            }.onFailure { state("Falha na chamada: ${it.message}", true) }
         }
     }
 
@@ -507,6 +528,18 @@ class P2pMessenger(
                         MessageActionCodec.decode(envelope.text)
                     }.onSuccess { action -> main.post { onMessageAction(action) } }
                         .onFailure { state("Operacao de mensagem rejeitada: ${it.message}", true) }
+                    packet.startsWith("L|") -> runCatching {
+                        val envelope = MessageCodec.open(
+                            packet.substring(2), identity, contact, identityStore::messageKey
+                        )
+                        CallControlCodec.decode(envelope.text).also { control ->
+                            require(control.timestamp == envelope.timestamp) { "Horario de chamada divergente." }
+                            require(kotlin.math.abs(System.currentTimeMillis() - control.timestamp) <= CallControlWindow) {
+                                "Controle de chamada expirado."
+                            }
+                        }
+                    }.onSuccess { control -> main.post { onCallControl(control) } }
+                        .onFailure { state("Controle de chamada rejeitado: ${it.message}", true) }
                     packet == "Q|mensageiro-sync-v1" -> main.post { onSyncRequested(0) }
                     packet.startsWith("Q|mensageiro-sync-v2|") -> runCatching {
                         packet.substringAfterLast('|').toLong().also { require(it >= 0) }
@@ -716,6 +749,7 @@ class P2pMessenger(
 
     private companion object {
         const val ProfileMaxSize = 2L * 1024 * 1024
+        const val CallControlWindow = 2 * 60_000L
         const val InitialRetryDelay = 20_000L
         const val MaxRetryDelay = 5 * 60_000L
         @Volatile private var sharedFactory: PeerConnectionFactory? = null

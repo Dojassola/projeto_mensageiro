@@ -75,6 +75,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
@@ -163,7 +164,9 @@ internal fun ConversationScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var text by rememberSaveable(contact?.peerId) { mutableStateOf("") }
+    val composerState = rememberSaveable(contact?.peerId, saver = MessageComposerState.Saver) {
+        MessageComposerState()
+    }
     var fileStatus by rememberSaveable(contact?.peerId) { mutableStateOf("") }
     var replyToId by rememberSaveable(contact?.peerId) { mutableStateOf<String?>(null) }
     var editingId by rememberSaveable(contact?.peerId) { mutableStateOf<String?>(null) }
@@ -172,9 +175,8 @@ internal fun ConversationScreen(
     var clock by remember { mutableStateOf(System.currentTimeMillis()) }
     val composerFocus = remember(contact?.peerId) { FocusRequester() }
     val listState = rememberLazyListState()
-    val imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
-    var initialScrollDone by remember(contact?.peerId) { mutableStateOf(false) }
     var followLatest by remember(contact?.peerId) { mutableStateOf(true) }
+    var sentScrollRequest by remember(contact?.peerId) { mutableStateOf(0) }
     val listener = remember(contact?.peerId) { MessagingRuntime.Listener { snapshot = it } }
     val chooseFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -199,17 +201,17 @@ internal fun ConversationScreen(
             MessagingRuntime.removeListener(listener)
         }
     }
-    val messages = snapshot.messages
+    val messages = remember(snapshot.messages) { snapshot.messages.asReversed() }
     val connected = snapshot.connected
     fun startReply(message: StoredMessage) {
-        if (editingId != null) text = ""
+        if (editingId != null) composerState.clear()
         editingId = null
         replyToId = message.id
     }
     fun startEdit(message: StoredMessage) {
         replyToId = null
         editingId = message.id
-        text = message.text
+        composerState.text = message.text
     }
     LaunchedEffect(messages, contact?.peerId) {
         if (contact != null) MessagingRuntime.markRead()
@@ -217,24 +219,16 @@ internal fun ConversationScreen(
     LaunchedEffect(replyToId, editingId) {
         if (replyToId != null || editingId != null) composerFocus.requestFocus()
     }
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty() && (!initialScrollDone || followLatest)) {
-            listState.scrollToItem(messages.lastIndex)
-            initialScrollDone = true
-        }
+    LaunchedEffect(messages.firstOrNull()?.id) {
+        if (messages.isNotEmpty() && followLatest) listState.scrollToItem(0)
     }
-    LaunchedEffect(imeBottom) {
-        if (imeBottom > 0 && followLatest && messages.isNotEmpty()) {
-            delay(80)
-            listState.scrollToItem(messages.lastIndex)
-        }
+    LaunchedEffect(sentScrollRequest) {
+        if (sentScrollRequest > 0 && messages.isNotEmpty()) listState.scrollToItem(0)
     }
-    LaunchedEffect(listState, contact?.peerId, imeBottom) {
-        if (imeBottom == 0) {
-            snapshotFlow {
-                messages.isEmpty() || listState.layoutInfo.visibleItemsInfo.any { it.index == messages.lastIndex }
-            }.collect { followLatest = it }
-        }
+    LaunchedEffect(listState, contact?.peerId) {
+        snapshotFlow {
+            messages.isEmpty() || listState.layoutInfo.visibleItemsInfo.any { it.index == 0 }
+        }.collect { followLatest = it }
     }
     LaunchedEffect(contact?.peerId) {
         while (true) {
@@ -244,7 +238,7 @@ internal fun ConversationScreen(
     }
 
     BackHandler(enabled = editingId != null || replyToId != null) {
-        if (editingId != null) text = ""
+        if (editingId != null) composerState.clear()
         editingId = null
         replyToId = null
     }
@@ -320,11 +314,12 @@ internal fun ConversationScreen(
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize().padding(horizontal = if (maxWidth < 360.dp) 8.dp else 12.dp),
+                reverseLayout = true,
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 itemsIndexed(messages, key = { _, message -> message.id }) { index, message ->
                     Column(Modifier.fillMaxWidth()) {
-                        if (index == 0 || !sameDay(messages[index - 1].timestamp, message.timestamp)) {
+                        if (index == messages.lastIndex || !sameDay(messages[index + 1].timestamp, message.timestamp)) {
                                             Text(
                                 messageDate(context, message.timestamp),
                                 modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
@@ -461,7 +456,7 @@ internal fun ConversationScreen(
                                                 MessagingRuntime.deleteMessage(contact.peerId, message.id)
                                                 if (editingId == message.id) {
                                                     editingId = null
-                                                    text = ""
+                                                    composerState.clear()
                                                 }
                                                 if (replyToId == message.id) replyToId = null
                                                 messageOptions = null
@@ -479,7 +474,7 @@ internal fun ConversationScreen(
                                                     if (error.isBlank()) {
                                                         if (editingId == message.id) {
                                                             editingId = null
-                                                            text = ""
+                                                            composerState.clear()
                                                         }
                                                         if (replyToId == message.id) replyToId = null
                                                         messageOptions = null
@@ -494,6 +489,16 @@ internal fun ConversationScreen(
                     }
                 }
             }
+            if (!followLatest && messages.isNotEmpty()) {
+                TextButton(
+                    onClick = {
+                        followLatest = true
+                        scope.launch { listState.animateScrollToItem(0) }
+                    },
+                    modifier = Modifier.align(Alignment.BottomCenter)
+                        .background(MaterialTheme.colorScheme.surface)
+                ) { Text("Novas mensagens") }
+            }
         }
         if (fileStatus.isNotBlank()) {
             Text(
@@ -503,89 +508,141 @@ internal fun ConversationScreen(
                 style = MaterialTheme.typography.bodySmall
             )
         }
-        BoxWithConstraints(
-            modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)
-        ) {
-            val compactComposer = maxWidth < 360.dp
-            val targetId = editingId ?: replyToId
-            val target = messages.firstOrNull { it.id == targetId }
-            Column {
-                if (targetId != null) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth()
-                            .background(MaterialTheme.colorScheme.surfaceVariant)
-                            .padding(start = 14.dp, top = 6.dp, bottom = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                if (editingId != null) "Editando mensagem"
-                                else "Respondendo a ${if (target?.mine == true) "voce" else contact.displayName}",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            Text(
-                                target?.let(::messagePreview) ?: "Mensagem indisponivel",
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        }
-                        TextButton(
-                            onClick = {
-                                if (editingId != null) text = ""
-                                editingId = null
-                                replyToId = null
-                            },
-                            modifier = Modifier.size(48.dp),
-                            contentPadding = PaddingValues(0.dp)
-                        ) { Text("X") }
-                    }
-                }
+        MessageComposer(
+            state = composerState,
+            contact = contact,
+            messages = messages,
+            editingId = editingId,
+            replyToId = replyToId,
+            focusRequester = composerFocus,
+            onChooseFile = { chooseFile.launch(arrayOf("*/*")) },
+            onCancel = {
+                editingId = null
+                replyToId = null
+            },
+            onReplySent = { replyToId = null },
+            onMessageSent = {
+                followLatest = true
+                sentScrollRequest++
+            },
+            onEditFinished = { editingId = null },
+            onError = { fileStatus = it }
+        )
+    }
+
+}
+
+private class MessageComposerState(initialText: String = "") {
+    var text by mutableStateOf(initialText)
+
+    fun clear() {
+        text = ""
+    }
+
+    companion object {
+        val Saver = Saver<MessageComposerState, String>(
+            save = { it.text },
+            restore = { MessageComposerState(it) }
+        )
+    }
+}
+
+@Composable
+private fun MessageComposer(
+    state: MessageComposerState,
+    contact: VerifiedContact,
+    messages: List<StoredMessage>,
+    editingId: String?,
+    replyToId: String?,
+    focusRequester: FocusRequester,
+    onChooseFile: () -> Unit,
+    onCancel: () -> Unit,
+    onReplySent: () -> Unit,
+    onMessageSent: () -> Unit,
+    onEditFinished: () -> Unit,
+    onError: (String) -> Unit
+) {
+    BoxWithConstraints(
+        modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)
+    ) {
+        val compact = maxWidth < 360.dp
+        val targetId = editingId ?: replyToId
+        val target = messages.firstOrNull { it.id == targetId }
+        Column {
+            if (targetId != null) {
                 Row(
                     modifier = Modifier.fillMaxWidth()
-                        .padding(horizontal = if (compactComposer) 6.dp else 10.dp, vertical = 8.dp),
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .padding(start = 14.dp, top = 6.dp, bottom = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            if (editingId != null) "Editando mensagem"
+                            else "Respondendo a ${if (target?.mine == true) "voce" else contact.displayName}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            target?.let(::messagePreview) ?: "Mensagem indisponivel",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
                     TextButton(
-                        onClick = { chooseFile.launch(arrayOf("*/*")) },
-                        modifier = Modifier.size(48.dp),
-                        enabled = editingId == null && replyToId == null,
-                        contentPadding = PaddingValues(0.dp)
-                    ) { Text("+") }
-                    Spacer(Modifier.size(if (compactComposer) 4.dp else 8.dp))
-                    OutlinedTextField(
-                        value = text,
-                        onValueChange = { if (it.length <= 4_000) text = it },
-                        modifier = Modifier.weight(1f).widthIn(min = 0.dp).focusRequester(composerFocus),
-                        placeholder = { Text(if (editingId == null) "Mensagem" else "Editar mensagem") },
-                        maxLines = 4
-                    )
-                    Spacer(Modifier.size(if (compactComposer) 4.dp else 8.dp))
-                    Button(
                         onClick = {
-                            val editing = editingId
-                            if (editing == null) {
-                                MessagingRuntime.send(contact.peerId, text, replyToId)
-                                text = ""
-                                replyToId = null
-                            } else {
-                                val error = MessagingRuntime.editMessage(contact.peerId, editing, text)
-                                fileStatus = error
-                                if (error.isBlank()) {
-                                    text = ""
-                                    editingId = null
-                                }
-                            }
+                            if (editingId != null) state.clear()
+                            onCancel()
                         },
-                        enabled = text.isNotBlank(),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
-                    ) { Text(if (editingId == null) "Enviar" else "Salvar") }
+                        modifier = Modifier.size(48.dp),
+                        contentPadding = PaddingValues(0.dp)
+                    ) { Text("X") }
                 }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth()
+                    .padding(horizontal = if (compact) 6.dp else 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(
+                    onClick = onChooseFile,
+                    modifier = Modifier.size(48.dp),
+                    enabled = editingId == null && replyToId == null,
+                    contentPadding = PaddingValues(0.dp)
+                ) { Text("+") }
+                Spacer(Modifier.size(if (compact) 4.dp else 8.dp))
+                OutlinedTextField(
+                    value = state.text,
+                    onValueChange = { if (it.length <= 4_000) state.text = it },
+                    modifier = Modifier.weight(1f).widthIn(min = 0.dp).focusRequester(focusRequester),
+                    placeholder = { Text(if (editingId == null) "Mensagem" else "Editar mensagem") },
+                    maxLines = 4
+                )
+                Spacer(Modifier.size(if (compact) 4.dp else 8.dp))
+                Button(
+                    onClick = {
+                        val editing = editingId
+                        if (editing == null) {
+                            MessagingRuntime.send(contact.peerId, state.text, replyToId)
+                            state.clear()
+                            onReplySent()
+                            onMessageSent()
+                        } else {
+                            val error = MessagingRuntime.editMessage(contact.peerId, editing, state.text)
+                            onError(error)
+                            if (error.isBlank()) {
+                                state.clear()
+                                onEditFinished()
+                            }
+                        }
+                    },
+                    enabled = state.text.isNotBlank(),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                ) { Text(if (editingId == null) "Enviar" else "Salvar") }
             }
         }
     }
-
 }
 
 @Composable
