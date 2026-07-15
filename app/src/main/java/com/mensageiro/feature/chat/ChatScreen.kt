@@ -54,7 +54,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -178,19 +177,35 @@ internal fun ConversationScreen(
     val listState = rememberLazyListState()
     var followLatest by remember(contact?.peerId) { mutableStateOf(true) }
     var sentScrollRequest by remember(contact?.peerId) { mutableStateOf(0) }
+    var showCallScreen by rememberSaveable(contact?.peerId) { mutableStateOf(false) }
     var pendingCallAction by remember(contact?.peerId) { mutableStateOf<(() -> Unit)?>(null) }
     val listener = remember(contact?.peerId) { MessagingRuntime.Listener { snapshot = it } }
-    val requestMicrophone = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+    val requestCallPermissions = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
         val action = pendingCallAction
         pendingCallAction = null
-        if (granted) action?.invoke() else fileStatus = "Permita o uso do microfone para fazer chamadas."
+        val microphoneGranted = permissions[Manifest.permission.RECORD_AUDIO] == true ||
+            context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (microphoneGranted) action?.invoke()
+        else fileStatus = "Permita o uso do microfone para fazer chamadas."
     }
     fun withMicrophone(action: () -> Unit) {
-        if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+        val missing = buildList {
+            if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                add(Manifest.permission.RECORD_AUDIO)
+            }
+            if (Build.VERSION.SDK_INT >= 31 &&
+                context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
+            ) {
+                add(Manifest.permission.BLUETOOTH_CONNECT)
+            }
+        }
+        if (missing.isEmpty()) {
             action()
         } else {
             pendingCallAction = action
-            requestMicrophone.launch(Manifest.permission.RECORD_AUDIO)
+            requestCallPermissions.launch(missing.toTypedArray())
         }
     }
     val chooseFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -237,6 +252,9 @@ internal fun ConversationScreen(
     LaunchedEffect(messages.firstOrNull()?.id) {
         if (messages.isNotEmpty() && followLatest) listState.scrollToItem(0)
     }
+    LaunchedEffect(snapshot.callId) {
+        if (snapshot.callId != null) showCallScreen = true
+    }
     LaunchedEffect(sentScrollRequest) {
         if (sentScrollRequest > 0 && messages.isNotEmpty()) listState.scrollToItem(0)
     }
@@ -264,6 +282,28 @@ internal fun ConversationScreen(
                 onClick = onBack,
                 modifier = if (useStatusBarPadding) Modifier.statusBarsPadding() else Modifier
             ) { Text("< Voltar") }
+            return@Column
+        }
+        if (snapshot.callState != CallState.IDLE && showCallScreen) {
+            CallScreen(
+                contactName = contact.displayName,
+                photo = profilePhotos.remote(contact.peerId),
+                state = snapshot.callState,
+                startedAt = snapshot.callStartedAt,
+                muted = snapshot.callMuted,
+                speakerOn = snapshot.speakerOn,
+                useStatusBarPadding = useStatusBarPadding,
+                onBack = { showCallScreen = false },
+                onAccept = {
+                    withMicrophone {
+                        fileStatus = MessagingRuntime.acceptCall(contact.peerId)
+                    }
+                },
+                onReject = { MessagingRuntime.rejectCall(contact.peerId) },
+                onMute = { MessagingRuntime.setCallMuted(contact.peerId, !snapshot.callMuted) },
+                onSpeaker = { MessagingRuntime.setSpeakerOn(contact.peerId, !snapshot.speakerOn) },
+                onEnd = { MessagingRuntime.endCall(contact.peerId) }
+            )
             return@Column
         }
 
@@ -325,6 +365,8 @@ internal fun ConversationScreen(
                             }
                         }
                     ) { Text("Ligar") }
+                } else {
+                    TextButton(onClick = { showCallScreen = true }) { Text("Chamada") }
                 }
                 TextButton(
                     onClick = onReconnect,
@@ -333,35 +375,6 @@ internal fun ConversationScreen(
                 ) { Text("↻") }
             }
             HorizontalDivider()
-        }
-        if (snapshot.callState == CallState.RINGING) {
-            AlertDialog(
-                onDismissRequest = {},
-                title = { Text("Chamada recebida") },
-                text = { Text(contact.displayName) },
-                confirmButton = {
-                    TextButton(onClick = {
-                        withMicrophone {
-                            fileStatus = MessagingRuntime.acceptCall(contact.peerId)
-                        }
-                    }) { Text("Atender") }
-                },
-                dismissButton = {
-                    TextButton(onClick = { MessagingRuntime.rejectCall(contact.peerId) }) {
-                        Text("Recusar")
-                    }
-                }
-            )
-        } else if (snapshot.callState != CallState.IDLE) {
-            CallBar(
-                state = snapshot.callState,
-                startedAt = snapshot.callStartedAt,
-                muted = snapshot.callMuted,
-                speakerOn = snapshot.speakerOn,
-                onMute = { MessagingRuntime.setCallMuted(contact.peerId, !snapshot.callMuted) },
-                onSpeaker = { MessagingRuntime.setSpeakerOn(contact.peerId, !snapshot.speakerOn) },
-                onEnd = { MessagingRuntime.endCall(contact.peerId) }
-            )
         }
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
             val bubbleWidth = minOf(560.dp, maxWidth * 0.84f)
@@ -587,40 +600,75 @@ internal fun ConversationScreen(
 }
 
 @Composable
-private fun CallBar(
+private fun CallScreen(
+    contactName: String,
+    photo: StoredAttachment?,
     state: CallState,
     startedAt: Long,
     muted: Boolean,
     speakerOn: Boolean,
+    useStatusBarPadding: Boolean,
+    onBack: () -> Unit,
+    onAccept: () -> Unit,
+    onReject: () -> Unit,
     onMute: () -> Unit,
     onSpeaker: () -> Unit,
     onEnd: () -> Unit
 ) {
     val duration by produceState(0L, state, startedAt) {
-        while (state == CallState.ACTIVE && startedAt > 0) {
+        while ((state == CallState.ACTIVE || state == CallState.RECONNECTING) && startedAt > 0) {
             value = (System.currentTimeMillis() - startedAt).coerceAtLeast(0)
             delay(1_000)
         }
     }
     val status = when (state) {
         CallState.CALLING -> "Chamando..."
+        CallState.RINGING -> "Chamada recebida"
         CallState.CONNECTING -> "Conectando chamada..."
         CallState.ACTIVE -> "%02d:%02d".format(duration / 60_000, duration / 1_000 % 60)
         CallState.RECONNECTING -> "Reconectando chamada..."
-        else -> ""
+        CallState.IDLE -> ""
     }
-    Row(
-        modifier = Modifier.fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically
+    val screenModifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface).let {
+        if (useStatusBarPadding) it.statusBarsPadding() else it
+    }
+    Column(
+        modifier = screenModifier.padding(horizontal = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text(status, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
-        if (state == CallState.ACTIVE || state == CallState.RECONNECTING) {
-            TextButton(onClick = onMute) { Text(if (muted) "Ativar mic" else "Silenciar") }
-            TextButton(onClick = onSpeaker) { Text(if (speakerOn) "Telefone" else "Viva-voz") }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = onBack) { Text("< Conversa") }
         }
-        TextButton(onClick = onEnd) { Text(if (state == CallState.CALLING) "Cancelar" else "Encerrar") }
+        Spacer(Modifier.weight(1f))
+        ProfileAvatar(photo, contactName, Modifier.size(112.dp))
+        Spacer(Modifier.height(20.dp))
+        Text(contactName, style = MaterialTheme.typography.headlineSmall, maxLines = 2, textAlign = TextAlign.Center)
+        Spacer(Modifier.height(8.dp))
+        Text(status, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.weight(1f))
+        if (state == CallState.RINGING) {
+            Button(onClick = onAccept, modifier = Modifier.fillMaxWidth().widthIn(max = 360.dp)) {
+                Text("Atender")
+            }
+            TextButton(onClick = onReject, modifier = Modifier.fillMaxWidth().widthIn(max = 360.dp)) {
+                Text("Recusar")
+            }
+        } else {
+            if (state == CallState.ACTIVE || state == CallState.RECONNECTING) {
+                Row(Modifier.fillMaxWidth().widthIn(max = 420.dp)) {
+                    TextButton(onClick = onMute, modifier = Modifier.weight(1f)) {
+                        Text(if (muted) "Ativar mic" else "Silenciar")
+                    }
+                    TextButton(onClick = onSpeaker, modifier = Modifier.weight(1f)) {
+                        Text(if (speakerOn) "Telefone" else "Viva-voz")
+                    }
+                }
+            }
+            Button(onClick = onEnd, modifier = Modifier.fillMaxWidth().widthIn(max = 360.dp)) {
+                Text(if (state == CallState.CALLING) "Cancelar" else "Encerrar")
+            }
+        }
+        Spacer(Modifier.height(24.dp))
     }
 }
 

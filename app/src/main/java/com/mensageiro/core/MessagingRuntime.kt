@@ -382,10 +382,12 @@ object MessagingRuntime {
         )
         session.callManager = CallManager(
             app,
+            contact.peerId,
             contact.displayName,
             isConnected = { session.connected },
             send = { session.messenger?.sendCallControl(it) },
-            onChanged = { if (isCurrent(session)) dispatch() }
+            onChanged = { if (isCurrent(session)) dispatch() },
+            onHistory = { onCallHistory(session, it) }
         )
     }
 
@@ -578,6 +580,13 @@ object MessagingRuntime {
             return
         }
         session.callManager?.receive(control)
+    }
+
+    @Synchronized
+    private fun onCallHistory(session: Session, text: String) {
+        if (!isCurrent(session)) return
+        messageStore?.addSystem(session.contact.peerId, text)
+        dispatch()
     }
 
     @Synchronized
