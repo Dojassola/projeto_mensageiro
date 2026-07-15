@@ -18,7 +18,7 @@ android {
         minSdk = 24
         targetSdk = 36
         versionCode = 24
-        versionName = "0.23.1"
+        versionName = "0.23.2"
 
         ndk {
             abiFilters += setOf("armeabi-v7a", "arm64-v8a")
@@ -79,6 +79,7 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.webrtc)
     implementation(libs.code.scanner)
     implementation(libs.google.auth)

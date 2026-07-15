@@ -301,8 +301,8 @@ object MessagingRuntime {
     }
 
     @Synchronized
-    fun snapshot(): MessagingSnapshot {
-        val session = sessions[selectedPeerId]
+    fun snapshot(peerId: String? = selectedPeerId): MessagingSnapshot {
+        val session = sessions[peerId]
         val store = messageStore
         val connectedCount = sessions.values.count { it.connected }
         return MessagingSnapshot(

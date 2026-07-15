@@ -115,7 +115,6 @@ import com.mensageiro.core.crypto.ProfilePhotoStore
 import com.mensageiro.core.crypto.StoredAttachment
 import com.mensageiro.core.crypto.StoredMessage
 import com.mensageiro.core.crypto.VerifiedContact
-import com.mensageiro.core.MessagingRuntime
 import com.mensageiro.core.webrtc.CallState
 import com.mensageiro.core.MessagingService
 import com.mensageiro.core.ContactPreview
@@ -148,6 +147,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.viewmodel.compose.viewModel
 
 @Composable
 @OptIn(ExperimentalFoundationApi::class)
@@ -158,28 +159,39 @@ internal fun ConversationScreen(
     modifier: Modifier,
     onBack: () -> Unit,
     onOpenProfile: () -> Unit,
-    onReconnect: () -> Unit,
     showBack: Boolean = true,
     useStatusBarPadding: Boolean = true
 ) {
     val context = LocalContext.current
+    if (contact == null) {
+        Column(modifier = modifier.fillMaxSize().navigationBarsPadding()) {
+            TextButton(
+                onClick = onBack,
+                modifier = if (useStatusBarPadding) Modifier.statusBarsPadding() else Modifier
+            ) { Text("< Voltar") }
+        }
+        return
+    }
+    val chatViewModel = viewModel<ChatViewModel>(key = "chat-${contact.peerId}") {
+        ChatViewModel(context.applicationContext, contact.peerId)
+    }
+    val uiState by chatViewModel.state.collectAsState()
+    val snapshot = uiState.snapshot
+    val replyToId = uiState.replyToId
+    val editingId = uiState.editingId
+    val fileStatus = uiState.message
     val scope = rememberCoroutineScope()
-    val composerState = rememberSaveable(contact?.peerId, saver = MessageComposerState.Saver) {
+    val composerState = rememberSaveable(contact.peerId, saver = MessageComposerState.Saver) {
         MessageComposerState()
     }
-    var fileStatus by rememberSaveable(contact?.peerId) { mutableStateOf("") }
-    var replyToId by rememberSaveable(contact?.peerId) { mutableStateOf<String?>(null) }
-    var editingId by rememberSaveable(contact?.peerId) { mutableStateOf<String?>(null) }
-    var messageOptions by remember(contact?.peerId) { mutableStateOf<StoredMessage?>(null) }
-    var snapshot by remember(contact?.peerId) { mutableStateOf(MessagingRuntime.snapshot()) }
+    var messageOptions by remember(contact.peerId) { mutableStateOf<StoredMessage?>(null) }
     var clock by remember { mutableStateOf(System.currentTimeMillis()) }
-    val composerFocus = remember(contact?.peerId) { FocusRequester() }
+    val composerFocus = remember(contact.peerId) { FocusRequester() }
     val listState = rememberLazyListState()
-    var followLatest by remember(contact?.peerId) { mutableStateOf(true) }
-    var sentScrollRequest by remember(contact?.peerId) { mutableStateOf(0) }
-    var showCallScreen by rememberSaveable(contact?.peerId) { mutableStateOf(false) }
-    var pendingCallAction by remember(contact?.peerId) { mutableStateOf<(() -> Unit)?>(null) }
-    val listener = remember(contact?.peerId) { MessagingRuntime.Listener { snapshot = it } }
+    var followLatest by remember(contact.peerId) { mutableStateOf(true) }
+    var sentScrollRequest by remember(contact.peerId) { mutableStateOf(0) }
+    var showCallScreen by rememberSaveable(contact.peerId) { mutableStateOf(false) }
+    var pendingCallAction by remember(contact.peerId) { mutableStateOf<(() -> Unit)?>(null) }
     val requestCallPermissions = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
@@ -188,7 +200,7 @@ internal fun ConversationScreen(
         val microphoneGranted = permissions[Manifest.permission.RECORD_AUDIO] == true ||
             context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         if (microphoneGranted) action?.invoke()
-        else fileStatus = "Permita o uso do microfone para fazer chamadas."
+        else chatViewModel.setMessage("Permita o uso do microfone para fazer chamadas.")
     }
     fun withMicrophone(action: () -> Unit) {
         val missing = buildList {
@@ -213,38 +225,28 @@ internal fun ConversationScreen(
         scope.launch {
             val result = withContext(Dispatchers.IO) { runCatching { attachmentStore.import(uri) } }
             result.onSuccess {
-                contact?.let { selected ->
-                    MessagingRuntime.sendFile(selected.peerId, it.messageId, it.attachment)
-                }
-                fileStatus = ""
+                chatViewModel.sendFile(it.messageId, it.attachment)
+                chatViewModel.setMessage("")
             }.onFailure {
-                fileStatus = it.message ?: "Falha ao preparar arquivo."
+                chatViewModel.setMessage(it.message ?: "Falha ao preparar arquivo.")
             }
         }
     }
-    DisposableEffect(contact?.peerId) {
-        contact?.let { MessagingRuntime.selectContact(context, it.peerId) }
-        MessagingRuntime.addListener(listener)
-        MessagingRuntime.setConversationVisible(contact?.peerId, contact != null)
-        onDispose {
-            MessagingRuntime.setConversationVisible(contact?.peerId, false)
-            MessagingRuntime.removeListener(listener)
-        }
+    DisposableEffect(chatViewModel) {
+        chatViewModel.attach()
+        onDispose(chatViewModel::detach)
     }
     val messages = remember(snapshot.messages) { snapshot.messages.asReversed() }
     val connected = snapshot.connected
     fun startReply(message: StoredMessage) {
         if (editingId != null) composerState.clear()
-        editingId = null
-        replyToId = message.id
+        chatViewModel.startReply(message)
     }
     fun startEdit(message: StoredMessage) {
-        replyToId = null
-        editingId = message.id
-        composerState.text = message.text
+        chatViewModel.startEditing(message)?.let { composerState.text = it }
     }
-    LaunchedEffect(messages, contact?.peerId) {
-        if (contact != null) MessagingRuntime.markRead()
+    LaunchedEffect(messages, contact.peerId) {
+        chatViewModel.markRead()
     }
     LaunchedEffect(replyToId, editingId) {
         if (replyToId != null || editingId != null) composerFocus.requestFocus()
@@ -258,12 +260,12 @@ internal fun ConversationScreen(
     LaunchedEffect(sentScrollRequest) {
         if (sentScrollRequest > 0 && messages.isNotEmpty()) listState.scrollToItem(0)
     }
-    LaunchedEffect(listState, contact?.peerId) {
+    LaunchedEffect(listState, contact.peerId) {
         snapshotFlow {
             messages.isEmpty() || listState.layoutInfo.visibleItemsInfo.any { it.index == 0 }
         }.collect { followLatest = it }
     }
-    LaunchedEffect(contact?.peerId) {
+    LaunchedEffect(contact.peerId) {
         while (true) {
             clock = System.currentTimeMillis()
             delay(30_000)
@@ -272,18 +274,10 @@ internal fun ConversationScreen(
 
     BackHandler(enabled = editingId != null || replyToId != null) {
         if (editingId != null) composerState.clear()
-        editingId = null
-        replyToId = null
+        chatViewModel.cancelComposer()
     }
 
     Column(modifier = modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
-        if (contact == null) {
-            TextButton(
-                onClick = onBack,
-                modifier = if (useStatusBarPadding) Modifier.statusBarsPadding() else Modifier
-            ) { Text("< Voltar") }
-            return@Column
-        }
         if (snapshot.callState != CallState.IDLE && showCallScreen) {
             CallScreen(
                 contactName = contact.displayName,
@@ -296,13 +290,13 @@ internal fun ConversationScreen(
                 onBack = { showCallScreen = false },
                 onAccept = {
                     withMicrophone {
-                        fileStatus = MessagingRuntime.acceptCall(contact.peerId)
+                        chatViewModel.acceptCall()
                     }
                 },
-                onReject = { MessagingRuntime.rejectCall(contact.peerId) },
-                onMute = { MessagingRuntime.setCallMuted(contact.peerId, !snapshot.callMuted) },
-                onSpeaker = { MessagingRuntime.setSpeakerOn(contact.peerId, !snapshot.speakerOn) },
-                onEnd = { MessagingRuntime.endCall(contact.peerId) }
+                onReject = chatViewModel::rejectCall,
+                onMute = { chatViewModel.setMuted(!snapshot.callMuted) },
+                onSpeaker = { chatViewModel.setSpeaker(!snapshot.speakerOn) },
+                onEnd = chatViewModel::endCall
             )
             return@Column
         }
@@ -361,7 +355,7 @@ internal fun ConversationScreen(
                         enabled = connected,
                         onClick = {
                             withMicrophone {
-                                fileStatus = MessagingRuntime.startCall(contact.peerId)
+                                chatViewModel.startCall()
                             }
                         }
                     ) { Text("Ligar") }
@@ -369,7 +363,7 @@ internal fun ConversationScreen(
                     TextButton(onClick = { showCallScreen = true }) { Text("Chamada") }
                 }
                 TextButton(
-                    onClick = onReconnect,
+                    onClick = chatViewModel::reconnect,
                     modifier = Modifier.size(48.dp).semantics { contentDescription = "Reconectar" },
                     contentPadding = PaddingValues(0.dp)
                 ) { Text("↻") }
@@ -446,7 +440,9 @@ internal fun ConversationScreen(
                                                 )
                                                 if (attachment.complete) {
                                                     TextButton(onClick = {
-                                                        fileStatus = openAttachment(context, attachmentStore, attachment)
+                                                        chatViewModel.setMessage(
+                                                            openAttachment(context, attachmentStore, attachment)
+                                                        )
                                                     }) { Text("Abrir") }
                                                 } else {
                                                     Text(
@@ -520,12 +516,8 @@ internal fun ConversationScreen(
                                         DropdownMenuItem(
                                             text = { Text("Excluir para mim") },
                                             onClick = {
-                                                MessagingRuntime.deleteMessage(contact.peerId, message.id)
-                                                if (editingId == message.id) {
-                                                    editingId = null
-                                                    composerState.clear()
-                                                }
-                                                if (replyToId == message.id) replyToId = null
+                                                if (editingId == message.id) composerState.clear()
+                                                chatViewModel.deleteLocal(message.id)
                                                 messageOptions = null
                                             }
                                         )
@@ -533,17 +525,8 @@ internal fun ConversationScreen(
                                             DropdownMenuItem(
                                                 text = { Text("Excluir para todos") },
                                                 onClick = {
-                                                    val error = MessagingRuntime.deleteMessageForEveryone(
-                                                        contact.peerId,
-                                                        message.id
-                                                    )
-                                                    fileStatus = error
-                                                    if (error.isBlank()) {
-                                                        if (editingId == message.id) {
-                                                            editingId = null
-                                                            composerState.clear()
-                                                        }
-                                                        if (replyToId == message.id) replyToId = null
+                                                    if (chatViewModel.deleteForEveryone(message.id)) {
+                                                        if (editingId == message.id) composerState.clear()
                                                         messageOptions = null
                                                     }
                                                 }
@@ -584,16 +567,18 @@ internal fun ConversationScreen(
             focusRequester = composerFocus,
             onChooseFile = { chooseFile.launch(arrayOf("*/*")) },
             onCancel = {
-                editingId = null
-                replyToId = null
+                if (editingId != null) composerState.clear()
+                chatViewModel.cancelComposer()
             },
-            onReplySent = { replyToId = null },
-            onMessageSent = {
-                followLatest = true
-                sentScrollRequest++
-            },
-            onEditFinished = { editingId = null },
-            onError = { fileStatus = it }
+            onSubmit = { text ->
+                val sendingNew = editingId == null
+                chatViewModel.submit(text).also { sent ->
+                    if (sent && sendingNew) {
+                        followLatest = true
+                        sentScrollRequest++
+                    }
+                }
+            }
         )
     }
 
@@ -697,10 +682,7 @@ private fun MessageComposer(
     focusRequester: FocusRequester,
     onChooseFile: () -> Unit,
     onCancel: () -> Unit,
-    onReplySent: () -> Unit,
-    onMessageSent: () -> Unit,
-    onEditFinished: () -> Unit,
-    onError: (String) -> Unit
+    onSubmit: (String) -> Boolean
 ) {
     BoxWithConstraints(
         modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)
@@ -762,20 +744,7 @@ private fun MessageComposer(
                 Spacer(Modifier.size(if (compact) 4.dp else 8.dp))
                 Button(
                     onClick = {
-                        val editing = editingId
-                        if (editing == null) {
-                            MessagingRuntime.send(contact.peerId, state.text, replyToId)
-                            state.clear()
-                            onReplySent()
-                            onMessageSent()
-                        } else {
-                            val error = MessagingRuntime.editMessage(contact.peerId, editing, state.text)
-                            onError(error)
-                            if (error.isBlank()) {
-                                state.clear()
-                                onEditFinished()
-                            }
-                        }
+                        if (onSubmit(state.text)) state.clear()
                     },
                     enabled = state.text.isNotBlank(),
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)

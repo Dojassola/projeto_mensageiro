@@ -280,8 +280,7 @@ fun MensageiroApp(
                     onOpen = ::openContact,
                     onProfile = ::openContactProfile,
                     onBack = { screen = Screen.Contacts },
-                    onOpenProfile = { contacts.firstOrNull { it.peerId == selectedPeerId }?.let(::openContactProfile) },
-                    onReconnect = { selectedPeerId?.let(MessagingRuntime::reconnect) }
+                    onOpenProfile = { contacts.firstOrNull { it.peerId == selectedPeerId }?.let(::openContactProfile) }
                 )
             } else when (screen) {
                 Screen.Contacts -> ContactsScreen(
@@ -303,8 +302,7 @@ fun MensageiroApp(
                     profilePhotos = container.profilePhotoStore,
                     modifier = Modifier.padding(innerPadding),
                     onBack = { screen = Screen.Contacts },
-                    onOpenProfile = { contacts.firstOrNull { it.peerId == selectedPeerId }?.let(::openContactProfile) },
-                    onReconnect = { selectedPeerId?.let(MessagingRuntime::reconnect) }
+                    onOpenProfile = { contacts.firstOrNull { it.peerId == selectedPeerId }?.let(::openContactProfile) }
                 )
                 Screen.Profile -> ProfileScreen(
                     identity = identity,
@@ -464,8 +462,7 @@ private fun ExpandedConversationLayout(
     onOpen: (VerifiedContact) -> Unit,
     onProfile: (VerifiedContact) -> Unit,
     onBack: () -> Unit,
-    onOpenProfile: () -> Unit,
-    onReconnect: () -> Unit
+    onOpenProfile: () -> Unit
 ) {
     Box(modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
         Row(Modifier.fillMaxHeight().widthIn(max = 1_280.dp).fillMaxWidth()) {
@@ -494,7 +491,6 @@ private fun ExpandedConversationLayout(
                     modifier = Modifier.weight(1f),
                     onBack = onBack,
                     onOpenProfile = onOpenProfile,
-                    onReconnect = onReconnect,
                     showBack = false,
                     useStatusBarPadding = false
                 )
