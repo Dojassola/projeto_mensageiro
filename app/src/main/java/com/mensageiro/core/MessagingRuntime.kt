@@ -22,6 +22,8 @@ import com.mensageiro.core.signaling.SignalingHub
 import com.mensageiro.core.webrtc.P2pMessenger
 import com.mensageiro.core.webrtc.CallAction
 import com.mensageiro.core.webrtc.CallControl
+import com.mensageiro.core.webrtc.CallManager
+import com.mensageiro.core.webrtc.CallState
 import java.text.DateFormat
 import java.util.Date
 import java.util.UUID
@@ -36,10 +38,11 @@ data class MessagingSnapshot(
     val lastOnline: Long,
     val serviceStatus: String,
     val callState: CallState = CallState.IDLE,
-    val callId: String? = null
+    val callId: String? = null,
+    val callStartedAt: Long = 0,
+    val callMuted: Boolean = false,
+    val speakerOn: Boolean = false
 )
-
-enum class CallState { IDLE, CALLING, RINGING, CONNECTING, ACTIVE }
 
 data class ContactPreview(
     val lastMessage: StoredMessage?,
@@ -52,12 +55,11 @@ object MessagingRuntime {
 
     private class Session(var contact: VerifiedContact) {
         var messenger: P2pMessenger? = null
+        var callManager: CallManager? = null
         var status = "Procurando ${contact.displayName}..."
         var connected = false
         var remoteActive = false
         var syncedMessages = 0
-        var callState = CallState.IDLE
-        var callId: String? = null
         val newFiles = mutableSetOf<String>()
     }
 
@@ -121,44 +123,36 @@ object MessagingRuntime {
     @Synchronized
     fun startCall(peerId: String): String {
         val session = sessions[peerId] ?: return "Contato indisponivel."
-        if (!session.connected) return "Contato desconectado."
-        if (session.callState != CallState.IDLE) return "Ja existe uma chamada em andamento."
-        val callId = UUID.randomUUID().toString()
-        session.callId = callId
-        session.callState = CallState.CALLING
-        session.messenger?.sendCallControl(CallControl(callId, CallAction.INVITE))
-        dispatch()
-        return ""
+        if (sessions.values.any { it !== session && it.callManager?.state != CallState.IDLE }) {
+            return "Ja existe uma chamada em andamento."
+        }
+        return session.callManager?.start() ?: "Chamada indisponivel."
     }
 
     @Synchronized
     fun acceptCall(peerId: String): String {
         val session = sessions[peerId] ?: return "Contato indisponivel."
-        val callId = session.callId ?: return "Chamada indisponivel."
-        if (session.callState != CallState.RINGING) return "Chamada indisponivel."
-        session.callState = CallState.CONNECTING
-        session.messenger?.sendCallControl(CallControl(callId, CallAction.ACCEPT))
-        dispatch()
-        return ""
+        return session.callManager?.accept() ?: "Chamada indisponivel."
     }
 
     @Synchronized
     fun rejectCall(peerId: String) {
-        val session = sessions[peerId] ?: return
-        val callId = session.callId ?: return
-        session.messenger?.sendCallControl(CallControl(callId, CallAction.REJECT))
-        clearCall(session)
-        dispatch()
+        sessions[peerId]?.callManager?.reject()
     }
 
     @Synchronized
     fun endCall(peerId: String) {
-        val session = sessions[peerId] ?: return
-        val callId = session.callId ?: return
-        val action = if (session.callState == CallState.CALLING) CallAction.CANCEL else CallAction.END
-        session.messenger?.sendCallControl(CallControl(callId, action))
-        clearCall(session)
-        dispatch()
+        sessions[peerId]?.callManager?.end()
+    }
+
+    @Synchronized
+    fun setCallMuted(peerId: String, muted: Boolean) {
+        sessions[peerId]?.callManager?.setMuted(muted)
+    }
+
+    @Synchronized
+    fun setSpeakerOn(peerId: String, enabled: Boolean) {
+        sessions[peerId]?.callManager?.setSpeaker(enabled)
     }
 
     @Synchronized
@@ -319,15 +313,21 @@ object MessagingRuntime {
             if (session != null && store != null) store.forContact(session.contact.peerId) else emptyList(),
             if (session != null && store != null) store.lastOnline(session.contact.peerId) else 0,
             if (sessions.isEmpty()) "Nenhum contato" else "$connectedCount de ${sessions.size} conectados",
-            session?.callState ?: CallState.IDLE,
-            session?.callId
+            session?.callManager?.state ?: CallState.IDLE,
+            session?.callManager?.callId,
+            session?.callManager?.startedAt ?: 0,
+            session?.callManager?.muted == true,
+            session?.callManager?.speakerOn == true
         )
     }
 
     private fun syncSessions(contacts: List<VerifiedContact>, identity: com.mensageiro.core.crypto.LocalIdentity) {
         val peerIds = contacts.mapTo(HashSet()) { it.peerId }
         sessions.keys.filter { it !in peerIds }.toList().forEach { peerId ->
-            sessions.remove(peerId)?.messenger?.close()
+            sessions.remove(peerId)?.let {
+                it.callManager?.disconnect()
+                it.messenger?.close()
+            }
         }
         contacts.forEach { contact ->
             val current = sessions[contact.peerId]
@@ -336,6 +336,7 @@ object MessagingRuntime {
             } else if (current.contact.publicKey != contact.publicKey ||
                 current.contact.encryptionPublicKey != contact.encryptionPublicKey
             ) {
+                current.callManager?.disconnect()
                 current.messenger?.close()
                 sessions.remove(contact.peerId)
                 createSession(contact, identity)
@@ -378,6 +379,13 @@ object MessagingRuntime {
             onCallControl = { onCallControl(session, it) },
             isBlocked = { contacts.isBlocked(contact.peerId) },
             isAppVisible = { appVisible }
+        )
+        session.callManager = CallManager(
+            app,
+            contact.displayName,
+            isConnected = { session.connected },
+            send = { session.messenger?.sendCallControl(it) },
+            onChanged = { if (isCurrent(session)) dispatch() }
         )
     }
 
@@ -563,30 +571,13 @@ object MessagingRuntime {
     @Synchronized
     private fun onCallControl(session: Session, control: CallControl) {
         if (!isCurrent(session)) return
-        when (control.action) {
-            CallAction.INVITE -> {
-                if (session.callState != CallState.IDLE) {
-                    session.messenger?.sendCallControl(CallControl(control.callId, CallAction.BUSY))
-                    return
-                }
-                session.callId = control.callId
-                session.callState = CallState.RINGING
-            }
-            CallAction.ACCEPT -> if (
-                session.callId == control.callId && session.callState == CallState.CALLING
-            ) {
-                session.callState = CallState.CONNECTING
-            }
-            CallAction.REJECT, CallAction.CANCEL, CallAction.END, CallAction.BUSY -> {
-                if (session.callId == control.callId) clearCall(session)
-            }
+        if (control.action == CallAction.INVITE &&
+            sessions.values.any { it !== session && it.callManager?.state != CallState.IDLE }
+        ) {
+            session.messenger?.sendCallControl(CallControl(control.callId, CallAction.BUSY))
+            return
         }
-        dispatch()
-    }
-
-    private fun clearCall(session: Session) {
-        session.callId = null
-        session.callState = CallState.IDLE
+        session.callManager?.receive(control)
     }
 
     @Synchronized
@@ -607,7 +598,7 @@ object MessagingRuntime {
         session.connected = connected
         if (!connected) {
             session.remoteActive = false
-            clearCall(session)
+            session.callManager?.disconnect()
         }
         if (connected) prepareConnectedSession(session, store)
         dispatch()
@@ -640,7 +631,10 @@ object MessagingRuntime {
     private fun isCurrent(session: Session): Boolean = sessions[session.contact.peerId] === session
 
     private fun closeSessions() {
-        sessions.values.forEach { it.messenger?.close() }
+        sessions.values.forEach {
+            it.callManager?.disconnect()
+            it.messenger?.close()
+        }
         sessions.clear()
         signalingHub?.close()
         signalingHub = null

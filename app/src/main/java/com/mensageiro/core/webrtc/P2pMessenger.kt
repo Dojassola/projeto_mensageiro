@@ -229,7 +229,7 @@ class P2pMessenger(
                     UUID.randomUUID().toString(),
                     control.timestamp,
                     identityStore::sign,
-                    maxLength = 2_000
+                    maxLength = 20_000
                 )
                 check(sendPacket(activeChannel, "L|$payload")) { "Falha ao enviar controle de chamada." }
             }.onFailure { state("Falha na chamada: ${it.message}", true) }
@@ -410,18 +410,7 @@ class P2pMessenger(
     }
 
     private fun createPeer() {
-        // ponytail: public prototype relay; replace with rotating credentials before release.
-        val iceServers = listOf(
-            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
-            turnServer("turn:openrelay.metered.ca:80"),
-            turnServer("turn:openrelay.metered.ca:443"),
-            turnServer("turn:openrelay.metered.ca:443?transport=tcp")
-        )
-        val config = PeerConnection.RTCConfiguration(iceServers).apply {
-            sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
-            continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
-        }
-        peer = checkNotNull(factory.createPeerConnection(config, PeerObserver(generation)))
+        peer = checkNotNull(factory.createPeerConnection(rtcConfiguration(), PeerObserver(generation)))
     }
 
     private fun resetPeer() {
@@ -436,12 +425,6 @@ class P2pMessenger(
         sessionId = null
         pendingIce.clear()
     }
-
-    private fun turnServer(url: String): PeerConnection.IceServer =
-        PeerConnection.IceServer.builder(url)
-            .setUsername("openrelayproject")
-            .setPassword("openrelayproject")
-            .createIceServer()
 
     private fun publish(type: String, payload: String) {
         if (closed) return
@@ -747,7 +730,7 @@ class P2pMessenger(
         fun empty() = org.webrtc.MediaConstraints()
     }
 
-    private companion object {
+    companion object {
         const val ProfileMaxSize = 2L * 1024 * 1024
         const val CallControlWindow = 2 * 60_000L
         const val InitialRetryDelay = 20_000L
@@ -755,12 +738,31 @@ class P2pMessenger(
         @Volatile private var sharedFactory: PeerConnectionFactory? = null
 
         @Synchronized
-        fun peerConnectionFactory(context: Context): PeerConnectionFactory {
+        internal fun peerConnectionFactory(context: Context): PeerConnectionFactory {
             sharedFactory?.let { return it }
             PeerConnectionFactory.initialize(
                 PeerConnectionFactory.InitializationOptions.builder(context).createInitializationOptions()
             )
             return PeerConnectionFactory.builder().createPeerConnectionFactory().also { sharedFactory = it }
+        }
+
+        internal fun rtcConfiguration(): PeerConnection.RTCConfiguration {
+            // ponytail: public prototype relay; replace with rotating credentials before release.
+            fun turn(url: String) = PeerConnection.IceServer.builder(url)
+                .setUsername("openrelayproject")
+                .setPassword("openrelayproject")
+                .createIceServer()
+            return PeerConnection.RTCConfiguration(
+                listOf(
+                    PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
+                    turn("turn:openrelay.metered.ca:80"),
+                    turn("turn:openrelay.metered.ca:443"),
+                    turn("turn:openrelay.metered.ca:443?transport=tcp")
+                )
+            ).apply {
+                sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
+                continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
+            }
         }
     }
 

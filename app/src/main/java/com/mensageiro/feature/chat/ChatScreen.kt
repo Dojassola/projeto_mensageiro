@@ -117,6 +117,7 @@ import com.mensageiro.core.crypto.StoredAttachment
 import com.mensageiro.core.crypto.StoredMessage
 import com.mensageiro.core.crypto.VerifiedContact
 import com.mensageiro.core.MessagingRuntime
+import com.mensageiro.core.webrtc.CallState
 import com.mensageiro.core.MessagingService
 import com.mensageiro.core.ContactPreview
 import com.mensageiro.core.AppUpdater
@@ -177,7 +178,21 @@ internal fun ConversationScreen(
     val listState = rememberLazyListState()
     var followLatest by remember(contact?.peerId) { mutableStateOf(true) }
     var sentScrollRequest by remember(contact?.peerId) { mutableStateOf(0) }
+    var pendingCallAction by remember(contact?.peerId) { mutableStateOf<(() -> Unit)?>(null) }
     val listener = remember(contact?.peerId) { MessagingRuntime.Listener { snapshot = it } }
+    val requestMicrophone = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        val action = pendingCallAction
+        pendingCallAction = null
+        if (granted) action?.invoke() else fileStatus = "Permita o uso do microfone para fazer chamadas."
+    }
+    fun withMicrophone(action: () -> Unit) {
+        if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            action()
+        } else {
+            pendingCallAction = action
+            requestMicrophone.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
     val chooseFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch {
@@ -301,6 +316,16 @@ internal fun ConversationScreen(
                     color = if (connected) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                if (snapshot.callState == CallState.IDLE) {
+                    TextButton(
+                        enabled = connected,
+                        onClick = {
+                            withMicrophone {
+                                fileStatus = MessagingRuntime.startCall(contact.peerId)
+                            }
+                        }
+                    ) { Text("Ligar") }
+                }
                 TextButton(
                     onClick = onReconnect,
                     modifier = Modifier.size(48.dp).semantics { contentDescription = "Reconectar" },
@@ -308,6 +333,35 @@ internal fun ConversationScreen(
                 ) { Text("↻") }
             }
             HorizontalDivider()
+        }
+        if (snapshot.callState == CallState.RINGING) {
+            AlertDialog(
+                onDismissRequest = {},
+                title = { Text("Chamada recebida") },
+                text = { Text(contact.displayName) },
+                confirmButton = {
+                    TextButton(onClick = {
+                        withMicrophone {
+                            fileStatus = MessagingRuntime.acceptCall(contact.peerId)
+                        }
+                    }) { Text("Atender") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { MessagingRuntime.rejectCall(contact.peerId) }) {
+                        Text("Recusar")
+                    }
+                }
+            )
+        } else if (snapshot.callState != CallState.IDLE) {
+            CallBar(
+                state = snapshot.callState,
+                startedAt = snapshot.callStartedAt,
+                muted = snapshot.callMuted,
+                speakerOn = snapshot.speakerOn,
+                onMute = { MessagingRuntime.setCallMuted(contact.peerId, !snapshot.callMuted) },
+                onSpeaker = { MessagingRuntime.setSpeakerOn(contact.peerId, !snapshot.speakerOn) },
+                onEnd = { MessagingRuntime.endCall(contact.peerId) }
+            )
         }
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
             val bubbleWidth = minOf(560.dp, maxWidth * 0.84f)
@@ -530,6 +584,44 @@ internal fun ConversationScreen(
         )
     }
 
+}
+
+@Composable
+private fun CallBar(
+    state: CallState,
+    startedAt: Long,
+    muted: Boolean,
+    speakerOn: Boolean,
+    onMute: () -> Unit,
+    onSpeaker: () -> Unit,
+    onEnd: () -> Unit
+) {
+    val duration by produceState(0L, state, startedAt) {
+        while (state == CallState.ACTIVE && startedAt > 0) {
+            value = (System.currentTimeMillis() - startedAt).coerceAtLeast(0)
+            delay(1_000)
+        }
+    }
+    val status = when (state) {
+        CallState.CALLING -> "Chamando..."
+        CallState.CONNECTING -> "Conectando chamada..."
+        CallState.ACTIVE -> "%02d:%02d".format(duration / 60_000, duration / 1_000 % 60)
+        CallState.RECONNECTING -> "Reconectando chamada..."
+        else -> ""
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(status, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+        if (state == CallState.ACTIVE || state == CallState.RECONNECTING) {
+            TextButton(onClick = onMute) { Text(if (muted) "Ativar mic" else "Silenciar") }
+            TextButton(onClick = onSpeaker) { Text(if (speakerOn) "Telefone" else "Viva-voz") }
+        }
+        TextButton(onClick = onEnd) { Text(if (state == CallState.CALLING) "Cancelar" else "Encerrar") }
+    }
 }
 
 private class MessageComposerState(initialText: String = "") {
