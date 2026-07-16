@@ -5,7 +5,9 @@ import android.content.Context
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
 import com.google.android.gms.auth.api.identity.AuthorizationRequest
+import com.google.android.gms.auth.api.identity.ClearTokenRequest
 import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.gms.common.Scopes
 import com.google.android.gms.common.api.Scope
@@ -25,7 +27,12 @@ object DriveBackupStorage {
     private const val MaxBackupBytes = 20_000_000
 
     fun authorizationRequest(): AuthorizationRequest = AuthorizationRequest.builder()
-        .setRequestedScopes(listOf(Scope(Scopes.DRIVE_APPFOLDER)))
+        .setRequestedScopes(
+            listOf(
+                Scope(Scopes.DRIVE_APPFOLDER),
+                Scope(Scopes.DRIVE_FILE)
+            )
+        )
         .build()
 
     fun accessToken(context: Context): String {
@@ -34,6 +41,31 @@ object DriveBackupStorage {
         )
         check(!result.hasResolution()) { "Reconecte o Google Drive pelo aplicativo." }
         return requireNotNull(result.accessToken) { "O Google Drive nao forneceu acesso." }
+    }
+
+    fun disconnect(context: Context, accessToken: String) {
+        val body = "token=" + URLEncoder.encode(accessToken, StandardCharsets.UTF_8.name())
+        val connection = URL("https://oauth2.googleapis.com/revoke").openConnection() as HttpURLConnection
+        try {
+            connection.requestMethod = "POST"
+            connection.connectTimeout = 20_000
+            connection.readTimeout = 20_000
+            connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+            connection.setFixedLengthStreamingMode(body.toByteArray(StandardCharsets.UTF_8).size)
+            connection.doOutput = true
+            connection.outputStream.bufferedWriter().use { it.write(body) }
+            if (connection.responseCode !in 200..299) {
+                val detail = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                throw IOException("Google recusou a desconexao (HTTP ${connection.responseCode}): $detail")
+            }
+        } finally {
+            connection.disconnect()
+        }
+        Tasks.await(
+            Identity.getAuthorizationClient(context.applicationContext).clearToken(
+                ClearTokenRequest.builder().setToken(accessToken).build()
+            )
+        )
     }
 
     fun upload(accessToken: String, backup: String) {
@@ -51,23 +83,24 @@ object DriveBackupStorage {
     }
 
     private fun uploadNew(accessToken: String, bytes: ByteArray): String {
-        val endpoint = "https://www.googleapis.com/upload/drive/v3/files" +
-            "?uploadType=resumable&fields=id"
+        val endpoint = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id"
+        val boundary = "mensageiro-backup-boundary"
         val metadata = JSONObject().put("name", FileName).put("parents", listOf("appDataFolder"))
-        val location = request(endpoint, "POST", accessToken) {
-            setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-            setRequestProperty("X-Upload-Content-Type", "application/json")
-            setRequestProperty("X-Upload-Content-Length", bytes.size.toString())
+        val prefix = ("--$boundary\r\n" +
+            "Content-Type: application/json; charset=UTF-8\r\n\r\n" +
+            metadata + "\r\n" +
+            "--$boundary\r\n" +
+            "Content-Type: application/json\r\n\r\n").toByteArray(StandardCharsets.UTF_8)
+        val suffix = "\r\n--$boundary--\r\n".toByteArray(StandardCharsets.UTF_8)
+        return request(endpoint, "POST", accessToken) {
+            setRequestProperty("Content-Type", "multipart/related; boundary=$boundary")
+            setFixedLengthStreamingMode(prefix.size + bytes.size + suffix.size)
             doOutput = true
-            outputStream.bufferedWriter().use { it.write(metadata.toString()) }
-            requireSuccess(this)
-            requireNotNull(getHeaderField("Location")) { "O Google Drive nao iniciou o envio." }
-        }
-        return request(location, "PUT", accessToken) {
-            setRequestProperty("Content-Type", "application/json")
-            setFixedLengthStreamingMode(bytes.size)
-            doOutput = true
-            outputStream.use { it.write(bytes) }
+            outputStream.use {
+                it.write(prefix)
+                it.write(bytes)
+                it.write(suffix)
+            }
             requireSuccess(this)
             JSONObject(inputStream.bufferedReader().use { it.readText() }).getString("id")
         }
@@ -120,7 +153,16 @@ object DriveBackupStorage {
         val code = connection.responseCode
         if (code in 200..299) return
         val detail = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty().take(300)
-        throw IOException("Google Drive respondeu HTTP $code${detail.takeIf { it.isNotBlank() }?.let { ": $it" }.orEmpty()}")
+        val operation = when {
+            connection.url.query?.contains("uploadType=multipart") == true -> "enviar backup"
+            connection.requestMethod == "POST" -> "criar backup"
+            connection.requestMethod == "PUT" -> "enviar backup"
+            connection.requestMethod == "DELETE" -> "remover backup antigo"
+            connection.url.query?.contains("alt=media") == true -> "baixar backup"
+            else -> "listar backups"
+        }
+        Log.e("DriveBackup", "$operation: HTTP $code $detail")
+        throw IOException("Google Drive falhou ao $operation (HTTP $code)${detail.takeIf { it.isNotBlank() }?.let { ": $it" }.orEmpty()}")
     }
 
     private fun readLimited(input: java.io.InputStream, limit: Int): ByteArray {

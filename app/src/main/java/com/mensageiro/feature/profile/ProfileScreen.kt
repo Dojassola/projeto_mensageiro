@@ -270,6 +270,19 @@ internal fun ProfileScreen(
                     backupStatus = "Falha ao restaurar do Drive: ${it.message ?: "erro desconhecido"}"
                 }
             }
+            DriveAction.Disconnect -> scope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    runCatching { DriveBackupStorage.disconnect(context, accessToken) }
+                }
+                backupBusy = false
+                result.onSuccess {
+                            AutomaticBackup.disable(context)
+                            automaticStatus = AutomaticBackup.status(context)
+                            backupStatus = "Google Drive desconectado. Conecte novamente para escolher a conta."
+                }.onFailure {
+                    backupStatus = "Falha ao desconectar o Google Drive: ${it.message ?: "erro desconhecido"}"
+                }
+            }
         }
     }
     val driveAuthorization = rememberLauncherForActivityResult(
@@ -446,6 +459,10 @@ internal fun ProfileScreen(
             onClick = { requestDrive(DriveAction.Restore) },
             enabled = password.length >= 6 && !backupBusy
         ) { Text("Restaurar do Drive") }
+        TextButton(
+            onClick = { requestDrive(DriveAction.Disconnect) },
+            enabled = !backupBusy
+        ) { Text("Desconectar Google Drive") }
         if (automaticStatus.enabled) {
             Spacer(Modifier.height(8.dp))
             Text("Destino: ${automaticStatus.destination}", style = MaterialTheme.typography.bodySmall)
@@ -512,4 +529,4 @@ private fun backupDateTime(timestamp: Long): String =
     ).format(Date(timestamp))
 
 
-private enum class DriveAction { Enable, Restore }
+private enum class DriveAction { Enable, Restore, Disconnect }
