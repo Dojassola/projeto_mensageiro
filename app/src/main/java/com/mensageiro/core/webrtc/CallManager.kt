@@ -11,13 +11,23 @@ import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.media.Ringtone
+import android.media.RingtoneManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import androidx.core.app.NotificationCompat
 import com.mensageiro.MainActivity
 import com.mensageiro.R
 import com.mensageiro.core.CallActionReceiver
+import com.mensageiro.core.CallDirection
+import com.mensageiro.core.CallEndedBy
+import com.mensageiro.core.CallHistoryEvent
+import com.mensageiro.core.CallHistoryStage
+import com.mensageiro.core.CallResult
 import com.mensageiro.core.CallService
 import java.util.UUID
 import org.json.JSONObject
@@ -38,7 +48,7 @@ class CallManager(
     private val isConnected: () -> Boolean,
     private val send: (CallControl) -> Unit,
     private val onChanged: () -> Unit,
-    private val onHistory: (String) -> Unit
+    private val onHistory: (CallHistoryEvent) -> Unit
 ) {
     private val app = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
@@ -51,6 +61,8 @@ class CallManager(
     private var initiator = false
     private var previousAudioMode = AudioManager.MODE_NORMAL
     private var focusRequest: AudioFocusRequest? = null
+    private var ringtone: Ringtone? = null
+    private var vibrator: Vibrator? = null
     private val focusListener = AudioManager.OnAudioFocusChangeListener { }
 
     @Volatile var state = CallState.IDLE
@@ -69,7 +81,9 @@ class CallManager(
         if (!hasMicrophonePermission()) return "Permita o uso do microfone."
         if (state != CallState.IDLE) return "Ja existe uma chamada em andamento."
         callId = UUID.randomUUID().toString()
-        onHistory("Chamada realizada")
+        onHistory(
+            CallHistoryEvent(callId!!, CallHistoryStage.STARTED, System.currentTimeMillis(), CallDirection.OUTGOING)
+        )
         setState(CallState.CALLING)
         send(CallControl(callId!!, CallAction.INVITE))
         scheduleTimeout(callId!!)
@@ -80,6 +94,7 @@ class CallManager(
         val id = callId ?: return "Chamada indisponivel."
         if (state != CallState.RINGING) return "Chamada indisponivel."
         if (!hasMicrophonePermission()) return "Permita o uso do microfone."
+        stopRinging()
         cancelIncomingNotification()
         preparePeer(id, false)
         setState(CallState.CONNECTING)
@@ -90,14 +105,15 @@ class CallManager(
     fun reject() {
         val id = callId ?: return
         send(CallControl(id, CallAction.REJECT))
-        closeCall("Chamada recusada")
+        closeCall(CallResult.DECLINED, CallEndedBy.ME)
     }
 
     fun end() {
         val id = callId ?: return
-        val action = if (state == CallState.CALLING) CallAction.CANCEL else CallAction.END
+        val calling = state == CallState.CALLING
+        val action = if (calling) CallAction.CANCEL else CallAction.END
         send(CallControl(id, action))
-        closeCall(if (state == CallState.CALLING) "Chamada cancelada" else null)
+        closeCall(if (calling) CallResult.CANCELED else CallResult.COMPLETED, CallEndedBy.ME)
     }
 
     fun receive(control: CallControl) {
@@ -112,10 +128,10 @@ class CallManager(
             CallAction.OFFER -> if (matches(control)) receiveOffer(control.payload ?: return)
             CallAction.ANSWER -> if (matches(control)) receiveAnswer(control.payload ?: return)
             CallAction.ICE -> if (matches(control)) receiveIce(control.payload ?: return)
-            CallAction.REJECT -> if (matches(control)) closeCall("Chamada recusada")
-            CallAction.CANCEL -> if (matches(control)) closeCall("Chamada perdida")
-            CallAction.BUSY -> if (matches(control)) closeCall("Contato ocupado")
-            CallAction.END -> if (matches(control)) closeCall()
+            CallAction.REJECT -> if (matches(control)) closeCall(CallResult.DECLINED, CallEndedBy.CONTACT)
+            CallAction.CANCEL -> if (matches(control)) closeCall(CallResult.MISSED, CallEndedBy.CONTACT)
+            CallAction.BUSY -> if (matches(control)) closeCall(CallResult.BUSY, CallEndedBy.CONTACT)
+            CallAction.END -> if (matches(control)) closeCall(CallResult.COMPLETED, CallEndedBy.CONTACT)
         }
     }
 
@@ -131,7 +147,10 @@ class CallManager(
         changed()
     }
 
-    fun disconnect() = closeCall()
+    fun disconnect() = closeCall(
+        if (state == CallState.RINGING) CallResult.MISSED else CallResult.INTERRUPTED,
+        CallEndedBy.SYSTEM
+    )
 
     private fun receiveInvite(id: String) {
         if (state != CallState.IDLE) {
@@ -139,8 +158,11 @@ class CallManager(
             return
         }
         callId = id
-        onHistory("Chamada recebida")
+        onHistory(
+            CallHistoryEvent(id, CallHistoryStage.STARTED, System.currentTimeMillis(), CallDirection.INCOMING)
+        )
         setState(CallState.RINGING)
+        startRinging()
         showIncomingNotification()
         scheduleTimeout(id)
     }
@@ -220,18 +242,20 @@ class CallManager(
         send(CallControl(id, CallAction.ICE, payload))
     }
 
-    private fun closeCall(result: String? = null) {
+    private fun closeCall(result: CallResult, endedBy: CallEndedBy) {
         val previousState = state
         if (previousState == CallState.IDLE && callId == null) return
-        val duration = if (startedAt > 0) System.currentTimeMillis() - startedAt else 0
+        val id = callId ?: return
+        val endedAt = System.currentTimeMillis()
         state = CallState.IDLE
         callId = null
         startedAt = 0
         muted = false
         speakerOn = false
+        stopRinging()
         cancelIncomingNotification()
         closeMedia()
-        onHistory(result ?: if (duration > 0) "Chamada encerrada - ${formatDuration(duration)}" else "Chamada encerrada")
+        onHistory(CallHistoryEvent(id, CallHistoryStage.ENDED, endedAt, result = result, endedBy = endedBy))
         changed()
     }
 
@@ -257,7 +281,10 @@ class CallManager(
 
     private fun setState(value: CallState) {
         state = value
-        if (value == CallState.ACTIVE && startedAt == 0L) startedAt = System.currentTimeMillis()
+        if (value == CallState.ACTIVE && startedAt == 0L) {
+            startedAt = System.currentTimeMillis()
+            callId?.let { onHistory(CallHistoryEvent(it, CallHistoryStage.CONNECTED, startedAt)) }
+        }
         changed()
     }
 
@@ -265,7 +292,14 @@ class CallManager(
 
     private fun scheduleTimeout(id: String) {
         main.postDelayed({
-            if (callId == id && (state == CallState.CALLING || state == CallState.RINGING)) end()
+            if (callId != id) return@postDelayed
+            if (state == CallState.RINGING) {
+                send(CallControl(id, CallAction.REJECT))
+                closeCall(CallResult.MISSED, CallEndedBy.SYSTEM)
+            } else if (state == CallState.CALLING) {
+                send(CallControl(id, CallAction.CANCEL))
+                closeCall(CallResult.NO_ANSWER, CallEndedBy.SYSTEM)
+            }
         }, CallTimeout)
     }
 
@@ -334,8 +368,36 @@ class CallManager(
         }
     }
 
-    private fun formatDuration(duration: Long): String =
-        "%02d:%02d".format(duration / 60_000, duration / 1_000 % 60)
+    private fun startRinging() {
+        if (audioManager.ringerMode == AudioManager.RINGER_MODE_SILENT) return
+        if (audioManager.ringerMode == AudioManager.RINGER_MODE_NORMAL) {
+            ringtone = RingtoneManager.getRingtone(app, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE))
+                ?.also {
+                    if (Build.VERSION.SDK_INT >= 28) it.isLooping = true
+                    it.play()
+                }
+        }
+        vibrator = if (Build.VERSION.SDK_INT >= 31) {
+            app.getSystemService(VibratorManager::class.java).defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            app.getSystemService(Vibrator::class.java)
+        }.also {
+            if (Build.VERSION.SDK_INT >= 26) {
+                it.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 700, 700), 0))
+            } else {
+                @Suppress("DEPRECATION")
+                it.vibrate(longArrayOf(0, 700, 700), 0)
+            }
+        }
+    }
+
+    private fun stopRinging() {
+        ringtone?.stop()
+        ringtone = null
+        vibrator?.cancel()
+        vibrator = null
+    }
 
     private fun showIncomingNotification() {
         if (Build.VERSION.SDK_INT >= 33 &&
@@ -343,7 +405,10 @@ class CallManager(
         ) return
         val manager = app.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
-            NotificationChannel(CallChannel, "Chamadas", NotificationManager.IMPORTANCE_HIGH)
+            NotificationChannel(CallChannel, "Chamadas recebidas", NotificationManager.IMPORTANCE_HIGH).apply {
+                setSound(null, null)
+                enableVibration(false)
+            }
         )
         val openApp = PendingIntent.getActivity(
             app,
@@ -394,7 +459,7 @@ class CallManager(
                     }
                 }
                 PeerConnection.IceConnectionState.FAILED,
-                PeerConnection.IceConnectionState.CLOSED -> closeCall()
+                PeerConnection.IceConnectionState.CLOSED -> closeCall(CallResult.INTERRUPTED, CallEndedBy.SYSTEM)
                 else -> Unit
             }
         }
@@ -421,7 +486,7 @@ class CallManager(
 
     private companion object {
         const val CallTimeout = 45_000L
-        const val CallChannel = "mensageiro_calls"
+        const val CallChannel = "mensageiro_incoming_calls_v2"
         const val IncomingNotification = 3_002
     }
 }

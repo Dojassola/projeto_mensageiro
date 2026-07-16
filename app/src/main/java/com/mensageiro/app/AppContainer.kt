@@ -7,6 +7,7 @@ import com.mensageiro.core.crypto.ContactStore
 import com.mensageiro.core.crypto.IdentityStore
 import com.mensageiro.core.crypto.MessageStore
 import com.mensageiro.core.crypto.ProfilePhotoStore
+import com.mensageiro.core.CallHistoryStore
 
 class AppContainer(context: Context) {
     private val appContext = context.applicationContext
@@ -16,6 +17,7 @@ class AppContainer(context: Context) {
     val messageStore = MessageStore(appContext, identityStore)
     val attachmentStore = AttachmentStore(appContext)
     val profilePhotoStore = ProfilePhotoStore(appContext)
+    val callHistoryStore = CallHistoryStore(appContext, identityStore)
     val backupManager = BackupManager(
         appContext,
         identityStore,

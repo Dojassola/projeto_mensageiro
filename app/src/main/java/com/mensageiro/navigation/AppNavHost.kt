@@ -132,6 +132,7 @@ import com.mensageiro.ui.contacts.AddContactScreen
 import com.mensageiro.ui.contacts.ContactsScreen
 import com.mensageiro.ui.profile.BlockedContactsSection
 import com.mensageiro.feature.chat.ConversationScreen
+import com.mensageiro.feature.call.CallHistoryScreen
 import com.mensageiro.feature.profile.ContactProfileScreen
 import com.mensageiro.feature.profile.ProfileScreen
 import com.mensageiro.app.AppContainer
@@ -266,6 +267,7 @@ fun MensageiroApp(
                         expanded = expanded,
                         onContacts = ::goBack,
                         onAddContact = { screen = Screen.AddContact },
+                        onCalls = { screen = Screen.Calls },
                         onProfile = { screen = Screen.Profile }
                     )
                 }
@@ -295,6 +297,13 @@ fun MensageiroApp(
                     contactStatus,
                     ::importContact,
                     Modifier.padding(innerPadding)
+                )
+                Screen.Calls -> CallHistoryScreen(
+                    store = container.callHistoryStore,
+                    contacts = contacts,
+                    profilePhotos = container.profilePhotoStore,
+                    modifier = Modifier.padding(innerPadding),
+                    onOpenContact = ::openContact
                 )
                 Screen.Conversation -> ConversationScreen(
                     contact = contacts.firstOrNull { it.peerId == selectedPeerId },
@@ -419,6 +428,7 @@ private fun AppTopBar(
     expanded: Boolean,
     onContacts: () -> Unit,
     onAddContact: () -> Unit,
+    onCalls: () -> Unit,
     onProfile: () -> Unit
 ) {
     Column(
@@ -434,6 +444,7 @@ private fun AppTopBar(
                     Text("Mensageiro", style = MaterialTheme.typography.titleLarge)
                     Spacer(Modifier.weight(1f))
                     TextButton(onClick = onAddContact) { Text(if (narrow) "+" else "+ Contato") }
+                    TextButton(onClick = onCalls) { Text(if (narrow) "Hist." else "Chamadas") }
                     TextButton(onClick = onProfile) { Text(if (narrow) "Eu" else "Perfil") }
                 } else {
                     TextButton(
@@ -513,6 +524,7 @@ internal fun qrCode(text: String): Bitmap {
 private enum class Screen(val title: String) {
     Contacts("Contatos"),
     AddContact("Adicionar"),
+    Calls("Chamadas"),
     Conversation("Conversa"),
     Profile("Perfil"),
     ContactProfile("Contato")

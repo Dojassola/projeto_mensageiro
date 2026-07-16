@@ -68,6 +68,7 @@ object MessagingRuntime {
     private var context: Context? = null
     private var identityStore: IdentityStore? = null
     private var messageStore: MessageStore? = null
+    private var callHistoryStore: CallHistoryStore? = null
     private var signalingHub: SignalingHub? = null
     private var selectedPeerId: String? = null
     private var conversationPeerId: String? = null
@@ -80,6 +81,9 @@ object MessagingRuntime {
         context = app
         if (identityStore == null) identityStore = container?.identityStore ?: IdentityStore(app)
         if (messageStore == null) messageStore = container?.messageStore ?: MessageStore(app, identityStore!!)
+        if (callHistoryStore == null) {
+            callHistoryStore = container?.callHistoryStore ?: CallHistoryStore(app, identityStore!!)
+        }
         AutomaticBackup.resume(app)
 
         val identity = identityStore!!.getOrCreate()
@@ -102,6 +106,7 @@ object MessagingRuntime {
         conversationPeerId = null
         identityStore = null
         messageStore = null
+        callHistoryStore = null
         start(source)
     }
 
@@ -583,10 +588,9 @@ object MessagingRuntime {
     }
 
     @Synchronized
-    private fun onCallHistory(session: Session, text: String) {
+    private fun onCallHistory(session: Session, event: CallHistoryEvent) {
         if (!isCurrent(session)) return
-        messageStore?.addSystem(session.contact.peerId, text)
-        dispatch()
+        callHistoryStore?.apply(session.contact.peerId, event)
     }
 
     @Synchronized

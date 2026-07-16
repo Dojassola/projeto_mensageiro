@@ -190,7 +190,7 @@ internal fun ConversationScreen(
     val listState = rememberLazyListState()
     var followLatest by remember(contact.peerId) { mutableStateOf(true) }
     var sentScrollRequest by remember(contact.peerId) { mutableStateOf(0) }
-    var showCallScreen by rememberSaveable(contact.peerId) { mutableStateOf(false) }
+    var showCallScreen by remember(contact.peerId) { mutableStateOf(false) }
     var pendingCallAction by remember(contact.peerId) { mutableStateOf<(() -> Unit)?>(null) }
     val requestCallPermissions = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -254,8 +254,8 @@ internal fun ConversationScreen(
     LaunchedEffect(messages.firstOrNull()?.id) {
         if (messages.isNotEmpty() && followLatest) listState.scrollToItem(0)
     }
-    LaunchedEffect(snapshot.callId) {
-        if (snapshot.callId != null) showCallScreen = true
+    LaunchedEffect(snapshot.callState) {
+        if (snapshot.callState == CallState.RINGING) showCallScreen = true
     }
     LaunchedEffect(sentScrollRequest) {
         if (sentScrollRequest > 0 && messages.isNotEmpty()) listState.scrollToItem(0)
@@ -355,6 +355,7 @@ internal fun ConversationScreen(
                         enabled = connected,
                         onClick = {
                             withMicrophone {
+                                showCallScreen = true
                                 chatViewModel.startCall()
                             }
                         }
