@@ -77,48 +77,54 @@ object MessagingRuntime {
     private var signalingHub: SignalingHub? = null
     private var selectedPeerId: String? = null
     private var conversationPeerId: String? = null
+    @Volatile private var started = false
     @Volatile private var appVisible = false
 
-    @Synchronized
     fun start(source: Context) {
+        if (started) return
         val app = source.applicationContext
         val container = (app as? MensageiroApplication)?.container
-        context = app
-        if (identityStore == null) identityStore = container?.identityStore ?: IdentityStore(app)
-        if (messageStore == null) messageStore = container?.messageStore ?: MessageStore(app, identityStore!!)
-        if (callHistoryStore == null) {
-            callHistoryStore = container?.callHistoryStore ?: CallHistoryStore(app, identityStore!!)
-        }
+        val localIdentityStore = container?.identityStore ?: IdentityStore(app)
+        val localMessageStore = container?.messageStore ?: MessageStore(app, localIdentityStore)
+        val localCallHistoryStore = container?.callHistoryStore ?: CallHistoryStore(app, localIdentityStore)
         AutomaticBackup.resume(app)
-
-        val identity = identityStore!!.getOrCreate()
-        if (signalingHub == null) signalingHub = SignalingHub(identity.peerId)
+        val identity = localIdentityStore.getOrCreate()
         val contacts = ContactStore(app)
-        syncSessions(contacts.all().filterNot { contacts.isBlocked(it.peerId) }, identity)
-
+        val availableContacts = contacts.all().filterNot { contacts.isBlocked(it.peerId) }
         val saved = app.getSharedPreferences("runtime", Context.MODE_PRIVATE)
             .getString("contact", null)
-        if (selectedPeerId !in sessions) {
-            selectedPeerId = saved?.takeIf { it in sessions } ?: sessions.keys.firstOrNull()
+
+        synchronized(this) {
+            if (started) return
+            context = app
+            identityStore = localIdentityStore
+            messageStore = localMessageStore
+            callHistoryStore = localCallHistoryStore
+            if (signalingHub == null) signalingHub = SignalingHub(identity.peerId)
+            syncSessions(availableContacts, identity)
+            if (selectedPeerId !in sessions) {
+                selectedPeerId = saved?.takeIf { it in sessions } ?: sessions.keys.firstOrNull()
+            }
+            started = true
+            dispatch()
         }
-        dispatch()
     }
 
-    @Synchronized
     fun reload(source: Context) {
-        closeSessions()
-        selectedPeerId = null
-        conversationPeerId = null
-        identityStore = null
-        messageStore = null
-        callHistoryStore = null
+        synchronized(this) {
+            closeSessions()
+            selectedPeerId = null
+            conversationPeerId = null
+            identityStore = null
+            messageStore = null
+            callHistoryStore = null
+            started = false
+        }
         start(source)
     }
 
     @Synchronized
     fun selectContact(source: Context, peerId: String) {
-        if (peerId !in sessions) start(source)
-        if (peerId !in sessions) return
         selectedPeerId = peerId
         source.getSharedPreferences("runtime", Context.MODE_PRIVATE)
             .edit().putString("contact", peerId).apply()
@@ -272,6 +278,7 @@ object MessagingRuntime {
         closeSessions()
         selectedPeerId = null
         conversationPeerId = null
+        started = false
         dispatch()
     }
 
@@ -299,7 +306,7 @@ object MessagingRuntime {
         val store = messageStore
         val session = sessions[peerId]
         return ContactPreview(
-            store?.forContact(peerId)?.lastOrNull { !it.system },
+            store?.lastMessage(peerId),
             store?.lastOnline(peerId) ?: 0,
             session?.connected == true && session.remoteActive
         )
@@ -350,6 +357,9 @@ object MessagingRuntime {
             it.timestamp > cursor.timestamp || (it.timestamp == cursor.timestamp && it.id >= cursor.id)
         }
     }
+
+    fun messageRevision(peerId: String): Long =
+        synchronized(this) { messageStore }?.revision(peerId) ?: 0
 
     private fun syncSessions(contacts: List<VerifiedContact>, identity: com.mensageiro.core.crypto.LocalIdentity) {
         val peerIds = contacts.mapTo(HashSet()) { it.peerId }

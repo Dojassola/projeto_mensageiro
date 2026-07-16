@@ -14,15 +14,17 @@ class AppContainer(context: Context) {
 
     val identityStore = IdentityStore(appContext)
     val contactStore = ContactStore(appContext)
-    val messageStore = MessageStore(appContext, identityStore)
+    val messageStore by lazy { MessageStore(appContext, identityStore) }
     val attachmentStore = AttachmentStore(appContext)
     val profilePhotoStore = ProfilePhotoStore(appContext)
     val callHistoryStore = CallHistoryStore(appContext, identityStore)
-    val backupManager = BackupManager(
-        appContext,
-        identityStore,
-        contactStore,
-        messageStore,
-        profilePhotoStore
-    )
+    val backupManager by lazy {
+        BackupManager(
+            appContext,
+            identityStore,
+            contactStore,
+            messageStore,
+            profilePhotoStore
+        )
+    }
 }

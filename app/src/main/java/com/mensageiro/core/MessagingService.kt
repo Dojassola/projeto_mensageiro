@@ -11,38 +11,29 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import com.mensageiro.MainActivity
+import java.util.concurrent.Executors
 
 class MessagingService : Service() {
-    private var lastServiceStatus: String? = null
-    private val listener = MessagingRuntime.Listener { snapshot ->
-        if (snapshot.serviceStatus == lastServiceStatus) return@Listener
-        lastServiceStatus = snapshot.serviceStatus
-        getSystemService(NotificationManager::class.java).notify(
-            ServiceNotificationId,
-            Notifications.service(this, snapshot.serviceStatus)
-        )
-    }
+    private val runtimeExecutor = Executors.newSingleThreadExecutor()
 
     override fun onCreate() {
         super.onCreate()
         Notifications.createChannels(this)
-        val notification = Notifications.service(this, "Iniciando...")
+        val notification = Notifications.service(this)
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(ServiceNotificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING)
         } else {
             startForeground(ServiceNotificationId, notification)
         }
-        MessagingRuntime.addListener(listener)
-        MessagingRuntime.start(this)
+        runtimeExecutor.execute { MessagingRuntime.start(this) }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        MessagingRuntime.start(this)
         return START_STICKY
     }
 
     override fun onDestroy() {
-        MessagingRuntime.removeListener(listener)
+        runtimeExecutor.shutdownNow()
         MessagingRuntime.stop()
         super.onDestroy()
     }
@@ -74,13 +65,15 @@ object Notifications {
         )
     }
 
-    fun service(context: Context, status: String): Notification =
+    fun service(context: Context): Notification =
         builder(context, ServiceChannel)
             .setSmallIcon(android.R.drawable.stat_notify_chat)
             .setContentTitle("Mensageiro ativo")
-            .setContentText(status)
+            .setContentText("Recebendo mensagens e chamadas")
             .setContentIntent(openApp(context))
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(Notification.PRIORITY_MIN)
             .setCategory(Notification.CATEGORY_SERVICE)
             .build()
 

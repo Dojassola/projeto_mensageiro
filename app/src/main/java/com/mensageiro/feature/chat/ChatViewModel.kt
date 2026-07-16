@@ -31,9 +31,10 @@ internal class ChatViewModel(
     private val peerId: String
 ) : ViewModel() {
     private val mutableState = MutableStateFlow(ChatUiState(MessagingRuntime.snapshot(peerId, includeMessages = false)))
-    private val listener = MessagingRuntime.Listener { refresh() }
+    private val listener = MessagingRuntime.Listener(::refresh)
     private var attached = false
     @Volatile private var initialLoaded = false
+    @Volatile private var messageRevision = -1L
     private var refreshJob: Job? = null
 
     val state: StateFlow<ChatUiState> = mutableState.asStateFlow()
@@ -42,6 +43,7 @@ internal class ChatViewModel(
         if (attached) return
         attached = true
         initialLoaded = false
+        messageRevision = -1L
         MessagingRuntime.addListener(listener)
         MessagingRuntime.setConversationVisible(peerId, true)
         loadInitial()
@@ -149,8 +151,18 @@ internal class ChatViewModel(
         mutableState.update { it.copy(message = message) }
     }
 
-    private fun refresh() {
-        if (!attached || !initialLoaded) return
+    private fun refresh(shell: MessagingSnapshot) {
+        if (!attached) return
+        if (!initialLoaded) {
+            mutableState.update { state -> state.copy(snapshot = shell.copy(messages = state.snapshot.messages)) }
+            return
+        }
+        val revision = MessagingRuntime.messageRevision(peerId)
+        if (revision == messageRevision) {
+            mutableState.update { state -> state.copy(snapshot = shell.copy(messages = state.snapshot.messages)) }
+            return
+        }
+        messageRevision = revision
         val loaded = mutableState.value.snapshot.messages
         val oldest = loaded.firstOrNull()
         if (oldest == null) {
@@ -161,7 +173,6 @@ internal class ChatViewModel(
         refreshJob?.cancel()
         refreshJob = viewModelScope.launch(Dispatchers.IO) {
             val updatedRange = MessagingRuntime.messagesFrom(peerId, cursor)
-            val shell = MessagingRuntime.snapshot(peerId, includeMessages = false)
             if (!isActive) return@launch
             mutableState.update { state ->
                 val olderLoadedDuringRefresh = state.snapshot.messages.filter {
@@ -174,8 +185,10 @@ internal class ChatViewModel(
 
     private fun loadInitial() {
         viewModelScope.launch(Dispatchers.IO) {
+            val revision = MessagingRuntime.messageRevision(peerId)
             val page = MessagingRuntime.messagePage(peerId, null, PageSize + 1)
             val shell = MessagingRuntime.snapshot(peerId, includeMessages = false)
+            messageRevision = revision
             initialLoaded = true
             mutableState.update {
                 it.copy(
@@ -183,6 +196,7 @@ internal class ChatViewModel(
                     hasOlderMessages = page.size > PageSize
                 )
             }
+            refresh(shell)
         }
     }
 

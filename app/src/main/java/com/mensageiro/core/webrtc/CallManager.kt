@@ -164,8 +164,7 @@ class CallManager(
             CallHistoryEvent(id, CallHistoryStage.STARTED, System.currentTimeMillis(), CallDirection.INCOMING)
         )
         setState(CallState.RINGING)
-        startRinging()
-        showIncomingNotification()
+        if (!showIncomingNotification()) startRinging()
         scheduleTimeout(id)
     }
 
@@ -410,15 +409,23 @@ class CallManager(
         vibrator = null
     }
 
-    private fun showIncomingNotification() {
+    private fun showIncomingNotification(): Boolean {
         if (Build.VERSION.SDK_INT >= 33 &&
             app.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) return
+        ) return false
         val manager = app.getSystemService(NotificationManager::class.java)
+        val ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
         manager.createNotificationChannel(
             NotificationChannel(CallChannel, "Chamadas recebidas", NotificationManager.IMPORTANCE_HIGH).apply {
-                setSound(null, null)
-                enableVibration(false)
+                setSound(
+                    ringtoneUri,
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build()
+                )
+                enableVibration(true)
+                vibrationPattern = longArrayOf(0, 700, 700)
             }
         )
         val openApp = PendingIntent.getActivity(
@@ -432,12 +439,17 @@ class CallManager(
             .setContentTitle("Chamada recebida")
             .setContentText(contactName)
             .setContentIntent(openApp)
+            .setFullScreenIntent(openApp, true)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .addAction(
                 0,
                 "Recusar",
                 CallActionReceiver.pendingIntent(app, peerId, CallActionReceiver.Reject)
             )
-            .setAutoCancel(true)
+            .setAutoCancel(false)
+            .setOngoing(true)
+            .setTimeoutAfter(CallTimeout)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
         if (hasMicrophonePermission()) {
             builder.addAction(
@@ -450,6 +462,7 @@ class CallManager(
             IncomingNotification,
             builder.build()
         )
+        return true
     }
 
     private fun cancelIncomingNotification() {
@@ -497,7 +510,7 @@ class CallManager(
 
     private companion object {
         const val CallTimeout = 45_000L
-        const val CallChannel = "mensageiro_incoming_calls_v2"
+        const val CallChannel = "mensageiro_incoming_calls_v3"
         const val IncomingNotification = 3_002
     }
 }

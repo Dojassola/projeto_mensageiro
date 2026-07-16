@@ -64,10 +64,18 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
     private val messageOrder = compareBy<StoredMessage>({ it.timestamp }, { it.id })
     private val conversations = messages.values.groupBy { it.contactPeerId }
         .mapValuesTo(HashMap()) { (_, values) -> values.sortedWith(messageOrder) }
+    private val revisions = conversations.keys.associateWithTo(HashMap()) { 1L }
 
     @Synchronized
     fun forContact(peerId: String): List<StoredMessage> =
         conversations[peerId].orEmpty()
+
+    @Synchronized
+    fun lastMessage(peerId: String): StoredMessage? =
+        conversations[peerId]?.lastOrNull { !it.system }
+
+    @Synchronized
+    fun revision(peerId: String): Long = revisions[peerId] ?: 0
 
     fun page(peerId: String, before: MessageCursor? = null, limit: Int = 50): List<StoredMessage> =
         database.page(peerId, before?.timestamp, before?.id, limit).mapNotNull { row ->
@@ -123,6 +131,7 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
         }
         database.upsert(updated.filter { it.id in changedIds }.map(::row))
         conversations[peerId] = updated
+        touch(peerId)
         AutomaticBackup.request(context)
         return updated.filter { it.id in changedIds }
     }
@@ -193,6 +202,7 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
         database.deleteConversation(peerId)
         deletedEditor.apply()
         conversations.remove(peerId)
+        touch(peerId)
         presence.edit().remove(peerId).apply()
         remoteDeletions(peerId).takeIf { it.isNotEmpty() }?.let { deletions ->
             val editor = remoteDeletionPrefs.edit()
@@ -243,6 +253,8 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
         conversations.clear()
         messages.groupBy { it.contactPeerId }
             .mapValuesTo(conversations) { (_, values) -> values.sortedWith(messageOrder) }
+        revisions.clear()
+        messages.mapTo(HashSet()) { it.contactPeerId }.forEach(::touch)
         AutomaticBackup.request(context)
     }
 
@@ -260,6 +272,7 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
         val index = updated.binarySearch(message, messageOrder).let { if (it >= 0) it else -it - 1 }
         updated.add(index, message)
         conversations[message.contactPeerId] = updated
+        touch(message.contactPeerId)
     }
 
     private fun removeFromConversation(message: StoredMessage) {
@@ -267,6 +280,11 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
         val updated = current.filterNot { it.id == message.id }
         if (updated.isEmpty()) conversations.remove(message.contactPeerId)
         else conversations[message.contactPeerId] = updated
+        touch(message.contactPeerId)
+    }
+
+    private fun touch(peerId: String) {
+        revisions[peerId] = (revisions[peerId] ?: 0) + 1
     }
 
     private fun row(message: StoredMessage): MessageRow = MessageRow(

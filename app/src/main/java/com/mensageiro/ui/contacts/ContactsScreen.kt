@@ -47,7 +47,13 @@ internal fun ContactsScreen(
 ) {
     var revision by remember { mutableStateOf(0) }
     var clock by remember { mutableStateOf(System.currentTimeMillis()) }
-    val listener = remember { MessagingRuntime.Listener { revision++ } }
+    var serviceStatus by remember { mutableStateOf("Conectando...") }
+    val listener = remember {
+        MessagingRuntime.Listener { snapshot ->
+            serviceStatus = snapshot.serviceStatus
+            revision++
+        }
+    }
     DisposableEffect(Unit) {
         MessagingRuntime.addListener(listener)
         onDispose { MessagingRuntime.removeListener(listener) }
@@ -66,6 +72,15 @@ internal fun ContactsScreen(
     }
 
     LazyColumn(modifier = modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+        item(key = "connection-status") {
+            Text(
+                serviceStatus,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            HorizontalDivider()
+        }
         if (contacts.isEmpty()) {
             item { Text("Nenhuma conversa.", modifier = Modifier.padding(vertical = 24.dp)) }
         } else {

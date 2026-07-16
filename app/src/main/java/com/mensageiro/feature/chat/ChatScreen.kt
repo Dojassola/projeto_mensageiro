@@ -117,6 +117,7 @@ import com.mensageiro.core.crypto.StoredMessage
 import com.mensageiro.core.crypto.VerifiedContact
 import com.mensageiro.core.webrtc.CallState
 import com.mensageiro.core.MessagingService
+import com.mensageiro.core.MessagingSnapshot
 import com.mensageiro.core.ContactPreview
 import com.mensageiro.core.AppUpdater
 import com.mensageiro.core.AppUpdate
@@ -187,7 +188,6 @@ internal fun ConversationScreen(
         MessageComposerState()
     }
     var messageOptions by remember(contact.peerId) { mutableStateOf<StoredMessage?>(null) }
-    var clock by remember { mutableStateOf(System.currentTimeMillis()) }
     val composerFocus = remember(contact.peerId) { FocusRequester() }
     val listState = rememberLazyListState()
     var followLatest by remember(contact.peerId) { mutableStateOf(true) }
@@ -272,13 +272,6 @@ internal fun ConversationScreen(
             if (nearOldest) chatViewModel.loadOlder()
         }
     }
-    LaunchedEffect(contact.peerId) {
-        while (true) {
-            clock = System.currentTimeMillis()
-            delay(30_000)
-        }
-    }
-
     BackHandler(enabled = editingId != null || replyToId != null) {
         if (editingId != null) composerState.clear()
         chatViewModel.cancelComposer()
@@ -340,15 +333,7 @@ internal fun ConversationScreen(
                             overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.titleMedium
                         )
-                        Text(
-                            if (snapshot.active) "online"
-                            else if (snapshot.lastOnline > 0) "visto ha ${elapsedTime(clock - snapshot.lastOnline)}"
-                            else snapshot.status,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        ConversationPresence(snapshot)
                     }
                 }
                 Text(
@@ -599,6 +584,26 @@ internal fun ConversationScreen(
         )
     }
 
+}
+
+@Composable
+private fun ConversationPresence(snapshot: MessagingSnapshot) {
+    var clock by remember(snapshot.contact?.peerId) { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(snapshot.contact?.peerId) {
+        while (true) {
+            clock = System.currentTimeMillis()
+            delay(30_000)
+        }
+    }
+    Text(
+        if (snapshot.active) "online"
+        else if (snapshot.lastOnline > 0) "visto ha ${elapsedTime(clock - snapshot.lastOnline)}"
+        else snapshot.status,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
 }
 
 @Composable
