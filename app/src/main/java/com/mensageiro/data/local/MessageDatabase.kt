@@ -62,6 +62,12 @@ internal class MessageDatabase(context: Context) :
             "ORDER BY timestamp, message_id"
     )
 
+    fun get(id: String): MessageRow? = query(
+        "SELECT message_id, peer_id, timestamp, payload FROM messages " +
+            "WHERE message_id = ? LIMIT 1",
+        arrayOf(id)
+    ).firstOrNull()
+
     fun page(peerId: String, beforeTimestamp: Long?, beforeId: String?, limit: Int): List<MessageRow> {
         require(limit in 1..200)
         val cursorTimestamp = beforeTimestamp

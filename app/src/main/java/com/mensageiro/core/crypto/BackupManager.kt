@@ -2,6 +2,7 @@ package com.mensageiro.core.crypto
 
 import android.content.Context
 import android.net.Uri
+import com.mensageiro.app.MensageiroApplication
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.SecureRandom
@@ -363,7 +364,9 @@ object AutomaticBackup {
         val dirtyAt = preferences.getLong("dirtyAt", 0)
         val result = runCatching {
             val password = IdentityStore(context).unprotect(requireNotNull(preferences.getString("password", null)))
-            val backup = BackupManager(context).export(password)
+            val manager = (context.applicationContext as? MensageiroApplication)
+                ?.container?.backupManager ?: BackupManager(context)
+            val backup = manager.export(password)
             when (preferences.getString("type", null)) {
                 Drive -> DriveBackupStorage.upload(DriveBackupStorage.accessToken(context), backup)
                 Local -> LocalBackupStorage.write(context, backup)

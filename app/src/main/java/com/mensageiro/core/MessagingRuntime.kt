@@ -108,6 +108,17 @@ object MessagingRuntime {
             started = true
             dispatch()
         }
+        storageScope.launch {
+            runCatching { localMessageStore.loadHistory() }
+            synchronized(this@MessagingRuntime) {
+                if (started && messageStore === localMessageStore && localMessageStore.isHistoryLoaded()) {
+                    sessions.values.filter { it.connected }.forEach {
+                        prepareConnectedSession(it, localMessageStore)
+                    }
+                    dispatch()
+                }
+            }
+        }
     }
 
     fun reload(source: Context) {
@@ -659,22 +670,23 @@ object MessagingRuntime {
         session.messenger?.sendPresence(appVisible)
         val photos = context?.let(::ProfilePhotoStore)
         session.messenger?.sendProfilePhoto(photos?.local().takeIf { photos?.isSharing() == true })
-        val latestTimestamp = store.forContact(session.contact.peerId)
+        val history = store.forContact(session.contact.peerId)
+        val latestTimestamp = history
             .filter { !it.system }
             .maxOfOrNull { maxOf(it.timestamp, it.editedAt) } ?: 0
         session.messenger?.requestSync(latestTimestamp)
-        store.forContact(session.contact.peerId)
+        history
             .filter { it.mine && it.status.ordinal < MessageStatus.DELIVERED.ordinal }
             .forEach {
                 if (it.attachment == null) session.messenger?.send(it)
                 else session.messenger?.sendFileOffer(it)
             }
-        store.forContact(session.contact.peerId)
+        history
             .filter { it.mine && it.editedAt > 0 }
             .forEach { session.messenger?.sendEdit(it) }
         store.remoteDeletions(session.contact.peerId)
             .forEach { session.messenger?.sendDelete(it.id, it.deletedAt) }
-        store.forContact(session.contact.peerId)
+        history
             .filter { !it.mine && !it.system && it.status.ordinal >= MessageStatus.DELIVERED.ordinal }
             .forEach { session.messenger?.sendReceipt(it.id, it.status) }
     }

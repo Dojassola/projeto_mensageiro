@@ -44,27 +44,59 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
     private val presence = this.context.getSharedPreferences("presence", Context.MODE_PRIVATE)
     private val deletedPrefs = this.context.getSharedPreferences("deleted_messages", Context.MODE_PRIVATE)
     private val remoteDeletionPrefs = this.context.getSharedPreferences("remote_deletions", Context.MODE_PRIVATE)
-    private val database = MessageDatabase(this.context).also { database ->
-        database.importLegacy {
-            prefs.all.mapNotNull { (id, value) ->
-                runCatching {
-                    val payload = value as String
-                    val message = decode(id, identityStore.unprotect(payload))
-                    MessageRow(id, message.contactPeerId, message.timestamp, payload)
-                }.getOrNull()
+    private val database = MessageDatabase(this.context)
+    private val messages = LinkedHashMap<String, StoredMessage>()
+    private val messageOrder = compareBy<StoredMessage>({ it.timestamp }, { it.id })
+    private val conversations = HashMap<String, List<StoredMessage>>()
+    private val revisions = HashMap<String, Long>()
+    private val historyLock = Object()
+    @Volatile private var historyLoaded = false
+    @Volatile private var historyLoading = false
+
+    fun loadHistory() {
+        synchronized(historyLock) {
+            while (historyLoading) historyLock.wait()
+            if (historyLoaded) return
+            historyLoading = true
+        }
+        var completed = false
+        try {
+            database.importLegacy {
+                prefs.all.mapNotNull { (id, value) ->
+                    runCatching {
+                        val payload = value as String
+                        val message = decode(id, identityStore.unprotect(payload))
+                        MessageRow(id, message.contactPeerId, message.timestamp, payload)
+                    }.getOrNull()
+                }
+            }
+            val stored = database.loadAll().mapNotNull { row ->
+                runCatching { decode(row.id, identityStore.unprotect(row.payload)) }.getOrNull()
+            }
+            synchronized(this) {
+                stored.filterNot { deletedPrefs.contains(it.id) }.forEach {
+                    messages.putIfAbsent(it.id, it)
+                }
+                val previousRevisions = HashMap(revisions)
+                conversations.clear()
+                messages.values.groupBy { it.contactPeerId }
+                    .mapValuesTo(conversations) { (_, values) -> values.sortedWith(messageOrder) }
+                revisions.clear()
+                conversations.keys.forEach { peerId ->
+                    revisions[peerId] = (previousRevisions[peerId] ?: 0) + 1
+                }
+            }
+            completed = true
+        } finally {
+            synchronized(historyLock) {
+                historyLoaded = completed
+                historyLoading = false
+                historyLock.notifyAll()
             }
         }
     }
-    private val messages = LinkedHashMap<String, StoredMessage>().apply {
-        database.loadAll().forEach { row ->
-            runCatching { decode(row.id, identityStore.unprotect(row.payload)) }
-                .onSuccess { put(row.id, it) }
-        }
-    }
-    private val messageOrder = compareBy<StoredMessage>({ it.timestamp }, { it.id })
-    private val conversations = messages.values.groupBy { it.contactPeerId }
-        .mapValuesTo(HashMap()) { (_, values) -> values.sortedWith(messageOrder) }
-    private val revisions = conversations.keys.associateWithTo(HashMap()) { 1L }
+
+    fun isHistoryLoaded(): Boolean = historyLoaded
 
     @Synchronized
     fun forContact(peerId: String): List<StoredMessage> =
@@ -87,11 +119,23 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
             runCatching { decode(row.id, identityStore.unprotect(row.payload)) }.getOrNull()
         }
 
-    @Synchronized
-    fun all(): List<StoredMessage> = messages.values.sortedBy { it.timestamp }
+    fun all(): List<StoredMessage> {
+        loadHistory()
+        return synchronized(this) { messages.values.sortedBy { it.timestamp } }
+    }
 
-    @Synchronized
-    fun get(id: String): StoredMessage? = messages[id]
+    fun get(id: String): StoredMessage? {
+        synchronized(this) { messages[id] }?.let { return it }
+        val loaded = database.get(id)?.let { row ->
+            runCatching { decode(row.id, identityStore.unprotect(row.payload)) }.getOrNull()
+        } ?: return null
+        return synchronized(this) {
+            messages[id] ?: loaded.also {
+                messages[id] = it
+                upsertConversation(it)
+            }
+        }
+    }
 
     @Synchronized
     fun add(message: StoredMessage): Boolean {
