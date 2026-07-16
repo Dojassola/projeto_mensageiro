@@ -103,6 +103,7 @@ class P2pMessenger(
     fun connect() {
         if (closed || isBlocked()) return
         executor.execute {
+            if (channel?.state() == DataChannel.State.OPEN) return@execute
             retryDelay = InitialRetryDelay
             signalingHub.setWaiting(contact.peerId, true, fast = true)
             beginConnection()

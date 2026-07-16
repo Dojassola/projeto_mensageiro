@@ -57,19 +57,9 @@ data class ContactPreview(
 object MessagingRuntime {
     fun interface Listener { fun onUpdate(snapshot: MessagingSnapshot) }
 
-    private class Session(var contact: VerifiedContact) {
-        var messenger: P2pMessenger? = null
-        var callManager: CallManager? = null
-        var status = "Procurando ${contact.displayName}..."
-        var connected = false
-        var remoteActive = false
-        var syncedMessages = 0
-        val newFiles = mutableSetOf<String>()
-    }
-
     private val listeners = CopyOnWriteArraySet<Listener>()
     private val storageScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val sessions = LinkedHashMap<String, Session>()
+    private val sessions = ConnectionManager()
     private var context: Context? = null
     private var identityStore: IdentityStore? = null
     private var messageStore: MessageStore? = null
@@ -185,6 +175,7 @@ object MessagingRuntime {
     @Synchronized
     fun setAppVisible(visible: Boolean) {
         appVisible = visible
+        if (visible) sessions.values.filter { !it.connected }.forEach { it.messenger?.connect() }
         sessions.values.forEach { it.messenger?.sendPresence(visible) }
         if (visible) markRead()
     }
@@ -378,10 +369,7 @@ object MessagingRuntime {
     private fun syncSessions(contacts: List<VerifiedContact>, identity: com.mensageiro.core.crypto.LocalIdentity) {
         val peerIds = contacts.mapTo(HashSet()) { it.peerId }
         sessions.keys.filter { it !in peerIds }.toList().forEach { peerId ->
-            sessions.remove(peerId)?.let {
-                it.callManager?.disconnect()
-                it.messenger?.close()
-            }
+            sessions.remove(peerId)
         }
         contacts.forEach { contact ->
             val current = sessions[contact.peerId]
@@ -408,7 +396,7 @@ object MessagingRuntime {
         val identities = identityStore ?: return
         val hub = signalingHub ?: return
         val contacts = ContactStore(app)
-        val session = Session(contact)
+        val session = ManagedPeerSession(contact)
         sessions[contact.peerId] = session
         session.messenger = P2pMessenger(
             app,
@@ -446,7 +434,7 @@ object MessagingRuntime {
     }
 
     @Synchronized
-    private fun onMessage(session: Session, received: com.mensageiro.core.crypto.ReceivedMessage) {
+    private fun onMessage(session: ManagedPeerSession, received: com.mensageiro.core.crypto.ReceivedMessage) {
         if (!isCurrent(session)) return
         val app = context ?: return
         val store = messageStore ?: return
@@ -483,7 +471,7 @@ object MessagingRuntime {
     }
 
     @Synchronized
-    private fun onMessageAction(session: Session, action: MessageAction) {
+    private fun onMessageAction(session: ManagedPeerSession, action: MessageAction) {
         if (!isCurrent(session)) return
         val store = messageStore ?: return
         val message = store.get(action.targetId)
@@ -510,14 +498,14 @@ object MessagingRuntime {
     }
 
     @Synchronized
-    private fun onSent(session: Session, id: String) {
+    private fun onSent(session: ManagedPeerSession, id: String) {
         if (!isCurrent(session)) return
         messageStore?.markStatus(id, MessageStatus.SENT)
         dispatch()
     }
 
     @Synchronized
-    private fun onReceipt(session: Session, id: String, status: MessageStatus) {
+    private fun onReceipt(session: ManagedPeerSession, id: String, status: MessageStatus) {
         if (!isCurrent(session)) return
         val store = messageStore ?: return
         val message = store.get(id)?.takeIf { it.contactPeerId == session.contact.peerId && it.mine } ?: return
@@ -526,7 +514,7 @@ object MessagingRuntime {
     }
 
     @Synchronized
-    private fun onPresence(session: Session, active: Boolean) {
+    private fun onPresence(session: ManagedPeerSession, active: Boolean) {
         if (!isCurrent(session)) return
         session.remoteActive = active
         messageStore?.markOnline(session.contact.peerId)
@@ -534,7 +522,7 @@ object MessagingRuntime {
     }
 
     @Synchronized
-    private fun onSyncRequested(session: Session, afterTimestamp: Long) {
+    private fun onSyncRequested(session: ManagedPeerSession, afterTimestamp: Long) {
         if (!isCurrent(session)) return
         // ponytail: sync por cauda; usar manifesto de IDs se buracos intermediarios forem relevantes.
         messageStore?.forContact(session.contact.peerId)
@@ -547,12 +535,12 @@ object MessagingRuntime {
     }
 
     @Synchronized
-    private fun onSyncedMessage(session: Session, message: StoredMessage) {
+    private fun onSyncedMessage(session: ManagedPeerSession, message: StoredMessage) {
         if (isCurrent(session) && messageStore?.mergeSynced(message) == true) session.syncedMessages++
     }
 
     @Synchronized
-    private fun onSyncFinished(session: Session) {
+    private fun onSyncFinished(session: ManagedPeerSession) {
         if (!isCurrent(session) || session.syncedMessages == 0) return
         val now = System.currentTimeMillis()
         messageStore?.addSystem(
@@ -567,14 +555,14 @@ object MessagingRuntime {
     }
 
     @Synchronized
-    private fun onFileOffer(session: Session, message: StoredMessage) {
+    private fun onFileOffer(session: ManagedPeerSession, message: StoredMessage) {
         if (!isCurrent(session)) return
         if (messageStore?.add(message) == true) session.newFiles += message.id
         dispatch()
     }
 
     @Synchronized
-    private fun onFileRequested(session: Session, id: String, offset: Long) {
+    private fun onFileRequested(session: ManagedPeerSession, id: String, offset: Long) {
         if (!isCurrent(session)) return
         val message = messageStore?.get(id)
             ?.takeIf { it.contactPeerId == session.contact.peerId && it.mine && it.attachment?.complete == true }
@@ -589,7 +577,7 @@ object MessagingRuntime {
     }
 
     @Synchronized
-    private fun onFileComplete(session: Session, id: String, attachment: StoredAttachment) {
+    private fun onFileComplete(session: ManagedPeerSession, id: String, attachment: StoredAttachment) {
         if (!isCurrent(session)) return
         val app = context ?: return
         val store = messageStore ?: return
@@ -608,14 +596,14 @@ object MessagingRuntime {
     }
 
     @Synchronized
-    private fun onProfilePhoto(session: Session, photo: StoredAttachment?) {
+    private fun onProfilePhoto(session: ManagedPeerSession, photo: StoredAttachment?) {
         if (!isCurrent(session)) return
         context?.let { ProfilePhotoStore(it).setRemote(session.contact.peerId, photo) }
         dispatch()
     }
 
     @Synchronized
-    private fun onContactPayload(session: Session, payload: String) {
+    private fun onContactPayload(session: ManagedPeerSession, payload: String) {
         if (!isCurrent(session)) return
         val app = context ?: return
         runCatching {
@@ -625,7 +613,7 @@ object MessagingRuntime {
     }
 
     @Synchronized
-    private fun onCallControl(session: Session, control: CallControl) {
+    private fun onCallControl(session: ManagedPeerSession, control: CallControl) {
         if (!isCurrent(session)) return
         if (control.action == CallAction.INVITE &&
             sessions.values.any { it !== session && it.callManager?.state != CallState.IDLE }
@@ -637,13 +625,13 @@ object MessagingRuntime {
     }
 
     @Synchronized
-    private fun onCallHistory(session: Session, event: CallHistoryEvent) {
+    private fun onCallHistory(session: ManagedPeerSession, event: CallHistoryEvent) {
         if (!isCurrent(session)) return
         callHistoryStore?.apply(session.contact.peerId, event)
     }
 
     @Synchronized
-    private fun onState(session: Session, newStatus: String, connected: Boolean) {
+    private fun onState(session: ManagedPeerSession, newStatus: String, connected: Boolean) {
         if (!isCurrent(session)) return
         val store = messageStore ?: return
         if (session.connected != connected) {
@@ -666,7 +654,7 @@ object MessagingRuntime {
         dispatch()
     }
 
-    private fun prepareConnectedSession(session: Session, store: MessageStore) {
+    private fun prepareConnectedSession(session: ManagedPeerSession, store: MessageStore) {
         session.messenger?.sendPresence(appVisible)
         val photos = context?.let(::ProfilePhotoStore)
         session.messenger?.sendProfilePhoto(photos?.local().takeIf { photos?.isSharing() == true })
@@ -691,14 +679,10 @@ object MessagingRuntime {
             .forEach { session.messenger?.sendReceipt(it.id, it.status) }
     }
 
-    private fun isCurrent(session: Session): Boolean = sessions[session.contact.peerId] === session
+    private fun isCurrent(session: ManagedPeerSession): Boolean = sessions[session.contact.peerId] === session
 
     private fun closeSessions() {
-        sessions.values.forEach {
-            it.callManager?.disconnect()
-            it.messenger?.close()
-        }
-        sessions.clear()
+        sessions.closeAll()
         signalingHub?.close()
         signalingHub = null
     }

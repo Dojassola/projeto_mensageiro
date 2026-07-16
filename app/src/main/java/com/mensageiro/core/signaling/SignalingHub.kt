@@ -24,6 +24,7 @@ class SignalingHub(private val receiverPeerId: String) {
     fun subscribe(peerId: String, onPayload: (String) -> Unit, onError: (String) -> Unit) {
         entries[peerId] = Entry(onPayload, onError)
         lastRequestAt = 0
+        executor.execute(::poll)
     }
 
     fun unsubscribe(peerId: String) {
@@ -36,6 +37,7 @@ class SignalingHub(private val receiverPeerId: String) {
         if (fast) {
             entry.fastUntil = System.currentTimeMillis() + FastWindow
             lastRequestAt = 0
+            executor.execute(::poll)
         }
     }
 
@@ -66,9 +68,9 @@ class SignalingHub(private val receiverPeerId: String) {
     }
 
     private companion object {
-        const val Tick = 5_000L
-        const val FastInterval = 5_000L
+        const val Tick = 1_000L
+        const val FastInterval = 1_000L
         const val IdleInterval = 30_000L
-        const val FastWindow = 90_000L
+        const val FastWindow = 30_000L
     }
 }
