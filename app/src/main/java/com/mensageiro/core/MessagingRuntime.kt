@@ -361,6 +361,9 @@ object MessagingRuntime {
     fun messageRevision(peerId: String): Long =
         synchronized(this) { messageStore }?.revision(peerId) ?: 0
 
+    fun messageExists(peerId: String, messageId: String): Boolean =
+        synchronized(this) { messageStore }?.get(messageId)?.contactPeerId == peerId
+
     private fun syncSessions(contacts: List<VerifiedContact>, identity: com.mensageiro.core.crypto.LocalIdentity) {
         val peerIds = contacts.mapTo(HashSet()) { it.peerId }
         sessions.keys.filter { it !in peerIds }.toList().forEach { peerId ->

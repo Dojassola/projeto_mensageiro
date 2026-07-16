@@ -55,6 +55,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -183,11 +184,13 @@ internal fun ConversationScreen(
     val fileStatus = uiState.message
     val loadingOlder = uiState.loadingOlder
     val hasOlderMessages = uiState.hasOlderMessages
+    val navigateToMessageId = uiState.navigateToMessageId
     val scope = rememberCoroutineScope()
     val composerState = rememberSaveable(contact.peerId, saver = MessageComposerState.Saver) {
         MessageComposerState()
     }
     var messageOptions by remember(contact.peerId) { mutableStateOf<StoredMessage?>(null) }
+    var highlightedMessageId by remember(contact.peerId) { mutableStateOf<String?>(null) }
     val composerFocus = remember(contact.peerId) { FocusRequester() }
     val listState = rememberLazyListState()
     var followLatest by remember(contact.peerId) { mutableStateOf(true) }
@@ -254,6 +257,16 @@ internal fun ConversationScreen(
     }
     LaunchedEffect(messages.firstOrNull()?.id) {
         if (messages.isNotEmpty() && followLatest) listState.scrollToItem(0)
+    }
+    LaunchedEffect(navigateToMessageId, messages) {
+        val messageId = navigateToMessageId ?: return@LaunchedEffect
+        val index = messages.indexOfFirst { it.id == messageId }
+        if (index < 0) return@LaunchedEffect
+        listState.animateScrollToItem(index)
+        highlightedMessageId = messageId
+        chatViewModel.navigationHandled(messageId)
+        delay(1_200)
+        highlightedMessageId = null
     }
     LaunchedEffect(snapshot.callState) {
         if (snapshot.callState == CallState.RINGING) showCallScreen = true
@@ -401,11 +414,16 @@ internal fun ConversationScreen(
                                     onSwipe = { startReply(message) }
                                 ) {
                                     Card(
-                                        Modifier.widthIn(min = 72.dp, max = bubbleWidth).combinedClickable(
+                                        modifier = Modifier.widthIn(min = 72.dp, max = bubbleWidth).combinedClickable(
                                             onClick = {},
                                             onLongClickLabel = "Opcoes da mensagem",
                                             onLongClick = { messageOptions = message }
-                                        )
+                                        ),
+                                        colors = if (highlightedMessageId == message.id) {
+                                            CardDefaults.cardColors(
+                                                containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                                            )
+                                        } else CardDefaults.cardColors()
                                     ) {
                                         Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                                             message.replyToId?.let { targetId ->
@@ -416,7 +434,8 @@ internal fun ConversationScreen(
                                                         target.mine -> "Voce"
                                                         else -> contact.displayName
                                                     },
-                                                    text = target?.let(::messagePreview) ?: "Mensagem indisponivel"
+                                                    text = target?.let(::messagePreview) ?: "Mensagem indisponivel",
+                                                    onClick = { chatViewModel.revealMessage(targetId) }
                                                 )
                                                 Spacer(Modifier.height(6.dp))
                                             }
@@ -832,11 +851,13 @@ private fun SwipeMessage(
 }
 
 @Composable
-private fun MessageQuote(title: String, text: String) {
+private fun MessageQuote(title: String, text: String, onClick: (() -> Unit)? = null) {
+    val modifier = Modifier.fillMaxWidth()
+        .background(MaterialTheme.colorScheme.surfaceVariant)
+        .let { current -> if (onClick == null) current else current.clickable(onClick = onClick) }
+        .padding(horizontal = 8.dp, vertical = 6.dp)
     Column(
-        Modifier.fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .padding(horizontal = 8.dp, vertical = 6.dp)
+        modifier
     ) {
         Text(
             title,

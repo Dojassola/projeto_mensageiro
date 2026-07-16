@@ -10,6 +10,7 @@ import com.mensageiro.core.crypto.StoredAttachment
 import com.mensageiro.core.crypto.StoredMessage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,7 +24,8 @@ internal data class ChatUiState(
     val editingId: String? = null,
     val message: String = "",
     val loadingOlder: Boolean = false,
-    val hasOlderMessages: Boolean = false
+    val hasOlderMessages: Boolean = false,
+    val navigateToMessageId: String? = null
 )
 
 internal class ChatViewModel(
@@ -81,6 +83,34 @@ internal class ChatViewModel(
                     hasOlderMessages = page.size > PageSize
                 )
             }
+        }
+    }
+
+    fun revealMessage(messageId: String) {
+        if (!MessagingRuntime.messageExists(peerId, messageId)) {
+            setMessage("Mensagem removida ou indisponivel.")
+            return
+        }
+        viewModelScope.launch {
+            while (attached && mutableState.value.snapshot.messages.none { it.id == messageId } &&
+                mutableState.value.hasOlderMessages
+            ) {
+                loadOlder()
+                do delay(16) while (attached && mutableState.value.loadingOlder)
+            }
+            mutableState.update { state ->
+                if (state.snapshot.messages.any { it.id == messageId }) {
+                    state.copy(navigateToMessageId = messageId)
+                } else {
+                    state.copy(message = "Mensagem removida ou indisponivel.")
+                }
+            }
+        }
+    }
+
+    fun navigationHandled(messageId: String) {
+        mutableState.update {
+            if (it.navigateToMessageId == messageId) it.copy(navigateToMessageId = null) else it
         }
     }
 
