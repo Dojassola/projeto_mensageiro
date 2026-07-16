@@ -1,6 +1,8 @@
 package com.mensageiro.core.crypto
 
 import android.content.Context
+import com.mensageiro.data.local.MessageDatabase
+import com.mensageiro.data.local.MessageRow
 import org.json.JSONObject
 
 data class StoredAttachment(
@@ -27,6 +29,8 @@ data class StoredMessage(
 
 data class MessageDeletion(val id: String, val contactPeerId: String, val deletedAt: Long)
 
+data class MessageCursor(val timestamp: Long, val id: String)
+
 enum class MessageStatus {
     PENDING,
     SENT,
@@ -40,10 +44,21 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
     private val presence = this.context.getSharedPreferences("presence", Context.MODE_PRIVATE)
     private val deletedPrefs = this.context.getSharedPreferences("deleted_messages", Context.MODE_PRIVATE)
     private val remoteDeletionPrefs = this.context.getSharedPreferences("remote_deletions", Context.MODE_PRIVATE)
+    private val database = MessageDatabase(this.context).also { database ->
+        database.importLegacy(
+            prefs.all.mapNotNull { (id, value) ->
+                runCatching {
+                    val payload = value as String
+                    val message = decode(id, identityStore.unprotect(payload))
+                    MessageRow(id, message.contactPeerId, message.timestamp, payload)
+                }.getOrNull()
+            }
+        )
+    }
     private val messages = LinkedHashMap<String, StoredMessage>().apply {
-        prefs.all.forEach { (id, value) ->
-            runCatching { decode(id, identityStore.unprotect(value as String)) }
-                .onSuccess { put(id, it) }
+        database.loadAll().forEach { row ->
+            runCatching { decode(row.id, identityStore.unprotect(row.payload)) }
+                .onSuccess { put(row.id, it) }
         }
     }
     private val messageOrder = compareBy<StoredMessage>({ it.timestamp }, { it.id })
@@ -53,6 +68,12 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
     @Synchronized
     fun forContact(peerId: String): List<StoredMessage> =
         conversations[peerId].orEmpty()
+
+    @Synchronized
+    fun page(peerId: String, before: MessageCursor? = null, limit: Int = 50): List<StoredMessage> =
+        database.page(peerId, before?.timestamp, before?.id, limit).mapNotNull { row ->
+            runCatching { decode(row.id, identityStore.unprotect(row.payload)) }.getOrNull()
+        }
 
     @Synchronized
     fun all(): List<StoredMessage> = messages.values.sortedBy { it.timestamp }
@@ -69,10 +90,10 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
 
     @Synchronized
     fun save(message: StoredMessage) {
+        database.upsert(row(message))
         messages.put(message.id, message)?.takeIf { it.contactPeerId != message.contactPeerId }
             ?.let(::removeFromConversation)
         upsertConversation(message)
-        prefs.edit().putString(message.id, identityStore.protect(encode(message))).apply()
         AutomaticBackup.request(context)
     }
 
@@ -91,15 +112,13 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
         }
         if (changed.isEmpty()) return emptyList()
         val changedIds = changed.mapTo(HashSet()) { it.id }
-        val editor = prefs.edit()
         val updated = current.map { message ->
             if (message.id !in changedIds) message else message.copy(status = MessageStatus.READ).also {
                 messages[it.id] = it
-                editor.putString(it.id, identityStore.protect(encode(it)))
             }
         }
+        database.upsert(updated.filter { it.id in changedIds }.map(::row))
         conversations[peerId] = updated
-        editor.apply()
         AutomaticBackup.request(context)
         return updated.filter { it.id in changedIds }
     }
@@ -145,7 +164,7 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
         val message = messages.remove(id)
         message?.let(::removeFromConversation)
         if (message == null && deletedPrefs.getLong(id, 0) >= deletedAt) return null
-        prefs.edit().remove(id).apply()
+        database.delete(id)
         deletedPrefs.edit().putLong(id, deletedAt).apply()
         if (forEveryone && message?.mine == true) {
             remoteDeletionPrefs.edit().putString(
@@ -161,15 +180,13 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
     fun deleteConversation(peerId: String): List<StoredMessage> {
         val removed = messages.values.filter { it.contactPeerId == peerId }
         if (removed.isEmpty()) return emptyList()
-        val messageEditor = prefs.edit()
         val deletedEditor = deletedPrefs.edit()
         val deletedAt = System.currentTimeMillis()
         removed.forEach {
             messages.remove(it.id)
-            messageEditor.remove(it.id)
             deletedEditor.putLong(it.id, deletedAt)
         }
-        messageEditor.apply()
+        database.deleteConversation(peerId)
         deletedEditor.apply()
         conversations.remove(peerId)
         presence.edit().remove(peerId).apply()
@@ -196,12 +213,10 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
         val editor = deletedPrefs.edit().clear()
         ids.forEach { editor.putLong(it, System.currentTimeMillis()) }
         editor.apply()
-        val messageEditor = prefs.edit()
+        database.delete(ids)
         ids.forEach {
             messages.remove(it)?.let(::removeFromConversation)
-            messageEditor.remove(it)
         }
-        messageEditor.apply()
     }
 
     fun replaceRemoteDeletions(deletions: List<MessageDeletion>) {
@@ -218,9 +233,7 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
 
     @Synchronized
     fun replaceAll(messages: List<StoredMessage>) {
-        val editor = prefs.edit().clear()
-        messages.forEach { editor.putString(it.id, identityStore.protect(encode(it))) }
-        editor.apply()
+        database.replaceAll(messages.map(::row))
         this.messages.clear()
         messages.associateByTo(this.messages) { it.id }
         conversations.clear()
@@ -251,6 +264,13 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
         if (updated.isEmpty()) conversations.remove(message.contactPeerId)
         else conversations[message.contactPeerId] = updated
     }
+
+    private fun row(message: StoredMessage): MessageRow = MessageRow(
+        message.id,
+        message.contactPeerId,
+        message.timestamp,
+        identityStore.protect(encode(message))
+    )
 
     private fun encode(message: StoredMessage): String {
         if (message.replyToId != null || message.editedAt > 0) {
