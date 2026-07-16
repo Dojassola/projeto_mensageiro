@@ -85,6 +85,7 @@ class CallManager(
             CallHistoryEvent(callId!!, CallHistoryStage.STARTED, System.currentTimeMillis(), CallDirection.OUTGOING)
         )
         setState(CallState.CALLING)
+        startCallingFeedback()
         send(CallControl(callId!!, CallAction.INVITE))
         scheduleTimeout(callId!!)
         return ""
@@ -120,6 +121,7 @@ class CallManager(
         when (control.action) {
             CallAction.INVITE -> receiveInvite(control.callId)
             CallAction.ACCEPT -> if (matches(control) && state == CallState.CALLING) {
+                stopRinging()
                 cancelIncomingNotification()
                 preparePeer(control.callId, true)
                 setState(CallState.CONNECTING)
@@ -377,6 +379,15 @@ class CallManager(
                     it.play()
                 }
         }
+        startVibration(longArrayOf(0, 700, 700))
+    }
+
+    private fun startCallingFeedback() {
+        startVibration(longArrayOf(0, 180, 820))
+    }
+
+    private fun startVibration(pattern: LongArray) {
+        vibrator?.cancel()
         vibrator = if (Build.VERSION.SDK_INT >= 31) {
             app.getSystemService(VibratorManager::class.java).defaultVibrator
         } else {
@@ -384,10 +395,10 @@ class CallManager(
             app.getSystemService(Vibrator::class.java)
         }.also {
             if (Build.VERSION.SDK_INT >= 26) {
-                it.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 700, 700), 0))
+                it.vibrate(VibrationEffect.createWaveform(pattern, 0))
             } else {
                 @Suppress("DEPRECATION")
-                it.vibrate(longArrayOf(0, 700, 700), 0)
+                it.vibrate(pattern, 0)
             }
         }
     }
