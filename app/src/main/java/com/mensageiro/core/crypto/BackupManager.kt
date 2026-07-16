@@ -60,6 +60,7 @@ class BackupManager(
                         .put("timestamp", message.timestamp)
                         .put("replyToId", message.replyToId)
                         .put("editedAt", message.editedAt)
+                        .put("authorSequence", message.authorSequence)
                     message.attachment?.let { attachment ->
                         value.put("attachment", JSONObject()
                             .put("name", attachment.name)
@@ -159,7 +160,9 @@ class BackupManager(
                     )
                 },
                 value.optString("replyToId").takeIf { it.isNotBlank() && it != "null" },
-                value.optLong("editedAt")
+                value.optLong("editedAt"),
+                value.optLong("authorSequence").takeIf { it > 0 }
+                    ?: MessageCodec.sequence(value.getString("id"))
             )
         }
         validateMessages(messages, contactIds)
@@ -194,6 +197,10 @@ class BackupManager(
             require(it.id.isNotBlank() && it.id.length <= 200) { "ID de mensagem invalido." }
             require(it.contactPeerId in contactIds) { "Mensagem vinculada a contato ausente." }
             require(it.timestamp > 0 && it.text.length <= 64_000) { "Mensagem invalida no backup." }
+            val encodedSequence = MessageCodec.sequence(it.id)
+            require(it.authorSequence >= 0 && (encodedSequence == 0L || it.authorSequence == encodedSequence)) {
+                "Sequencia de mensagem invalida no backup."
+            }
             require(it.editedAt >= 0 && (it.replyToId == null || it.replyToId.length <= 200)) {
                 "Referencia de mensagem invalida no backup."
             }

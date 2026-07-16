@@ -24,7 +24,8 @@ data class StoredMessage(
     val timestamp: Long,
     val attachment: StoredAttachment? = null,
     val replyToId: String? = null,
-    val editedAt: Long = 0
+    val editedAt: Long = 0,
+    val authorSequence: Long = MessageCodec.sequence(id)
 )
 
 data class MessageDeletion(val id: String, val contactPeerId: String, val deletedAt: Long)
@@ -44,6 +45,7 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
     private val presence = this.context.getSharedPreferences("presence", Context.MODE_PRIVATE)
     private val deletedPrefs = this.context.getSharedPreferences("deleted_messages", Context.MODE_PRIVATE)
     private val remoteDeletionPrefs = this.context.getSharedPreferences("remote_deletions", Context.MODE_PRIVATE)
+    private val sequencePrefs = this.context.getSharedPreferences("message_sequences", Context.MODE_PRIVATE)
     private val database = MessageDatabase(this.context)
     private val messages = LinkedHashMap<String, StoredMessage>()
     private val messageOrder = compareBy<StoredMessage>({ it.timestamp }, { it.id })
@@ -97,6 +99,30 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
     }
 
     fun isHistoryLoaded(): Boolean = historyLoaded
+
+    fun nextAuthorSequence(peerId: String): Long {
+        loadHistory()
+        return synchronized(this) {
+            val current = maxOf(
+                sequencePrefs.getLong(peerId, 0),
+                conversations[peerId].orEmpty().asSequence()
+                    .filter { it.mine }
+                    .maxOfOrNull(StoredMessage::authorSequence) ?: 0
+            )
+            check(current < Long.MAX_VALUE) { "Limite de sequencia de mensagens atingido." }
+            (current + 1).also { sequencePrefs.edit().putLong(peerId, it).apply() }
+        }
+    }
+
+    @Synchronized
+    fun contiguousSequence(peerId: String, mine: Boolean): Long {
+        val sequences = conversations[peerId].orEmpty().asSequence()
+            .filter { it.mine == mine && it.authorSequence > 0 }
+            .mapTo(HashSet(), StoredMessage::authorSequence)
+        var head = 0L
+        while (head + 1 in sequences) head++
+        return head
+    }
 
     @Synchronized
     fun forContact(peerId: String): List<StoredMessage> =
@@ -200,13 +226,15 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
         val current = get(message.id) ?: return add(message)
         val status = if (message.status.ordinal > current.status.ordinal) message.status else current.status
         val newerEdit = message.editedAt > current.editedAt
-        if (!newerEdit && status == current.status) return false
+        val learnedSequence = current.authorSequence == 0L && message.authorSequence > 0L
+        if (!newerEdit && status == current.status && !learnedSequence) return false
         save(
             current.copy(
                 status = status,
                 text = if (newerEdit) message.text else current.text,
                 replyToId = if (newerEdit) message.replyToId else current.replyToId,
-                editedAt = maxOf(current.editedAt, message.editedAt)
+                editedAt = maxOf(current.editedAt, message.editedAt),
+                authorSequence = maxOf(current.authorSequence, message.authorSequence)
             )
         )
         return true
@@ -339,8 +367,8 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
     )
 
     private fun encode(message: StoredMessage): String {
-        if (message.replyToId != null || message.editedAt > 0) {
-            return "v4\n" + JSONObject()
+        if (message.authorSequence > 0 || message.replyToId != null || message.editedAt > 0) {
+            return (if (message.authorSequence > 0) "v5\n" else "v4\n") + JSONObject()
                 .put("contactPeerId", message.contactPeerId)
                 .put("mine", message.mine)
                 .put("status", message.status.name)
@@ -349,6 +377,7 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
                 .put("text", message.text)
                 .put("replyToId", message.replyToId)
                 .put("editedAt", message.editedAt)
+                .put("authorSequence", message.authorSequence)
                 .apply {
                     message.attachment?.let { attachment ->
                         put("attachment", JSONObject()
@@ -384,7 +413,7 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
     }
 
     private fun decode(id: String, text: String): StoredMessage {
-        if (text.startsWith("v4\n")) {
+        if (text.startsWith("v5\n") || text.startsWith("v4\n")) {
             val value = JSONObject(text.substring(3))
             val attachment = value.optJSONObject("attachment")?.let {
                 StoredAttachment(
@@ -406,7 +435,8 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
                 value.getLong("timestamp"),
                 attachment,
                 value.optString("replyToId").takeIf { it.isNotBlank() && it != "null" },
-                value.optLong("editedAt")
+                value.optLong("editedAt"),
+                value.optLong("authorSequence").takeIf { it > 0 } ?: MessageCodec.sequence(id)
             )
         }
         if (text.startsWith("v3\n")) {

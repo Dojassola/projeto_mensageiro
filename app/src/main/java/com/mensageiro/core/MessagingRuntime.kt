@@ -12,6 +12,7 @@ import com.mensageiro.core.crypto.ContactStore
 import com.mensageiro.core.crypto.IdentityStore
 import com.mensageiro.core.crypto.MessageAction
 import com.mensageiro.core.crypto.MessageActionType
+import com.mensageiro.core.crypto.MessageCodec
 import com.mensageiro.core.crypto.MessageStatus
 import com.mensageiro.core.crypto.MessageStore
 import com.mensageiro.core.crypto.ProfilePhotoStore
@@ -20,13 +21,13 @@ import com.mensageiro.core.crypto.StoredMessage
 import com.mensageiro.core.crypto.VerifiedContact
 import com.mensageiro.core.signaling.SignalingHub
 import com.mensageiro.core.webrtc.P2pMessenger
+import com.mensageiro.core.webrtc.SyncRequest
 import com.mensageiro.core.webrtc.CallAction
 import com.mensageiro.core.webrtc.CallControl
 import com.mensageiro.core.webrtc.CallManager
 import com.mensageiro.core.webrtc.CallState
 import java.text.DateFormat
 import java.util.Date
-import java.util.UUID
 import java.util.concurrent.CopyOnWriteArraySet
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -198,9 +199,10 @@ object MessagingRuntime {
         val reply = replyToId?.takeIf { id ->
             store.get(id)?.let { it.contactPeerId == session.contact.peerId && !it.system } == true
         }
+        val authorSequence = store.nextAuthorSequence(session.contact.peerId)
         val message = StoredMessage(
-            UUID.randomUUID().toString(), session.contact.peerId, true, MessageStatus.PENDING, false,
-            text.trim(), System.currentTimeMillis(), replyToId = reply
+            MessageCodec.sequencedId(authorSequence), session.contact.peerId, true, MessageStatus.PENDING, false,
+            text.trim(), System.currentTimeMillis(), replyToId = reply, authorSequence = authorSequence
         )
         store.add(message)
         if (session.connected) session.messenger?.send(message)
@@ -451,7 +453,8 @@ object MessagingRuntime {
                 false,
                 received.text,
                 received.timestamp,
-                replyToId = replyToId
+                replyToId = replyToId,
+                authorSequence = received.authorSequence
             )
         )
         val savedStatus = store.get(received.id)
@@ -522,13 +525,17 @@ object MessagingRuntime {
     }
 
     @Synchronized
-    private fun onSyncRequested(session: ManagedPeerSession, afterTimestamp: Long) {
+    private fun onSyncRequested(session: ManagedPeerSession, request: SyncRequest) {
         if (!isCurrent(session)) return
-        // ponytail: sync por cauda; usar manifesto de IDs se buracos intermediarios forem relevantes.
         messageStore?.forContact(session.contact.peerId)
             ?.filter {
-                !it.system && it.attachment == null &&
-                    (it.timestamp > afterTimestamp || it.editedAt > afterTimestamp)
+                if (it.system || it.attachment != null) return@filter false
+                if (request.supportsRanges && it.authorSequence > 0) {
+                    it.authorSequence > (if (it.mine) request.contactSequence else request.ownSequence) ||
+                        it.editedAt > request.afterTimestamp
+                } else {
+                    it.timestamp > request.afterTimestamp || it.editedAt > request.afterTimestamp
+                }
             }
             ?.forEach { session.messenger?.sendSync(it) }
         session.messenger?.finishSync()
@@ -662,7 +669,11 @@ object MessagingRuntime {
         val latestTimestamp = history
             .filter { !it.system }
             .maxOfOrNull { maxOf(it.timestamp, it.editedAt) } ?: 0
-        session.messenger?.requestSync(latestTimestamp)
+        session.messenger?.requestSync(
+            latestTimestamp,
+            store.contiguousSequence(session.contact.peerId, mine = true),
+            store.contiguousSequence(session.contact.peerId, mine = false)
+        )
         history
             .filter { it.mine && it.status.ordinal < MessageStatus.DELIVERED.ordinal }
             .forEach {

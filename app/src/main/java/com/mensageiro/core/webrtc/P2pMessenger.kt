@@ -43,6 +43,13 @@ import java.io.RandomAccessFile
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
+data class SyncRequest(
+    val afterTimestamp: Long,
+    val ownSequence: Long = 0,
+    val contactSequence: Long = 0,
+    val supportsRanges: Boolean = false
+)
+
 class P2pMessenger(
     context: Context,
     private val identity: LocalIdentity,
@@ -55,7 +62,7 @@ class P2pMessenger(
     private val onSent: (String) -> Unit,
     private val onReceipt: (String, MessageStatus) -> Unit,
     private val onPresence: (Boolean, Long) -> Unit,
-    private val onSyncRequested: (Long) -> Unit,
+    private val onSyncRequested: (SyncRequest) -> Unit,
     private val onSyncedMessage: (StoredMessage) -> Unit,
     private val onSyncFinished: () -> Unit,
     private val onFileOffer: (StoredMessage) -> Unit,
@@ -237,8 +244,10 @@ class P2pMessenger(
         }
     }
 
-    fun requestSync(afterTimestamp: Long) =
-        sendControl("Q|mensageiro-sync-v2|${afterTimestamp.coerceAtLeast(0)}")
+    fun requestSync(afterTimestamp: Long, ownSequence: Long, contactSequence: Long) = sendControl(
+        "Q|mensageiro-sync-v2|${ownSequence.coerceAtLeast(0)}|" +
+            "${contactSequence.coerceAtLeast(0)}|${afterTimestamp.coerceAtLeast(0)}"
+    )
 
     fun finishSync() = sendControl("E|mensageiro-sync-v1")
 
@@ -257,6 +266,7 @@ class P2pMessenger(
                     .put("text", message.text)
                     .put("replyToId", message.replyToId)
                     .put("editedAt", message.editedAt)
+                    .put("authorSequence", message.authorSequence)
                     .toString()
                 val payload = MessageCodec.create(
                     identity,
@@ -524,10 +534,20 @@ class P2pMessenger(
                         }
                     }.onSuccess { control -> main.post { onCallControl(control) } }
                         .onFailure { state("Controle de chamada rejeitado: ${it.message}", true) }
-                    packet == "Q|mensageiro-sync-v1" -> main.post { onSyncRequested(0) }
+                    packet == "Q|mensageiro-sync-v1" -> main.post { onSyncRequested(SyncRequest(0)) }
                     packet.startsWith("Q|mensageiro-sync-v2|") -> runCatching {
-                        packet.substringAfterLast('|').toLong().also { require(it >= 0) }
-                    }.onSuccess { timestamp -> main.post { onSyncRequested(timestamp) } }
+                        val fields = packet.split('|')
+                        when (fields.size) {
+                            3 -> SyncRequest(fields[2].toLong().also { require(it >= 0) })
+                            5 -> SyncRequest(
+                                fields[4].toLong().also { require(it >= 0) },
+                                fields[2].toLong().also { require(it >= 0) },
+                                fields[3].toLong().also { require(it >= 0) },
+                                true
+                            )
+                            else -> error("Formato de sincronizacao invalido.")
+                        }
+                    }.onSuccess { request -> main.post { onSyncRequested(request) } }
                         .onFailure { state("Pedido de sincronizacao invalido.", true) }
                     packet == "E|mensageiro-sync-v1" -> main.post(onSyncFinished)
                     packet.startsWith("S|") -> runCatching {
@@ -542,8 +562,14 @@ class P2pMessenger(
                         val id = record.getString("id")
                         val text = record.getString("text")
                         val timestamp = record.getLong("timestamp")
+                        val encodedSequence = MessageCodec.sequence(id)
+                        val authorSequence = record.optLong("authorSequence").takeIf { it > 0 }
+                            ?: encodedSequence
                         require(id.isNotBlank() && id.length <= 200 && text.length <= 4_000 && timestamp > 0) {
                             "Mensagem sincronizada invalida."
+                        }
+                        require(authorSequence >= 0 && (encodedSequence == 0L || authorSequence == encodedSequence)) {
+                            "Sequencia sincronizada invalida."
                         }
                         StoredMessage(
                             id,
@@ -555,7 +581,8 @@ class P2pMessenger(
                             timestamp,
                             replyToId = record.optString("replyToId")
                                 .takeIf { it.isNotBlank() && it != "null" },
-                            editedAt = record.optLong("editedAt")
+                            editedAt = record.optLong("editedAt"),
+                            authorSequence = authorSequence
                         )
                     }.onSuccess { message -> main.post { onSyncedMessage(message) } }
                         .onFailure { state("Sincronizacao rejeitada: ${it.message}", true) }

@@ -4,7 +4,13 @@ import java.nio.charset.StandardCharsets
 import java.security.Signature
 import java.util.UUID
 
-data class ReceivedMessage(val id: String, val text: String, val timestamp: Long, val replyToId: String? = null)
+data class ReceivedMessage(
+    val id: String,
+    val text: String,
+    val timestamp: Long,
+    val replyToId: String? = null,
+    val authorSequence: Long = MessageCodec.sequence(id)
+)
 
 object MessageCodec {
     private const val Version = "mensageiro-message-v1"
@@ -71,6 +77,14 @@ object MessageCodec {
     fun id(wire: String): String = wire.substringAfter('.').substringBefore('.')
 
     fun timestamp(wire: String): Long = wire.split('.', limit = 7)[5].toLong()
+
+    fun sequencedId(sequence: Long): String {
+        require(sequence > 0)
+        return "m$sequence-${UUID.randomUUID()}"
+    }
+
+    fun sequence(id: String): Long = id.takeIf { it.startsWith('m') }
+        ?.substringAfter('m')?.substringBefore('-')?.toLongOrNull()?.takeIf { it > 0 } ?: 0
 
     private fun context(id: String, sender: String, recipient: String) = "$id|$sender|$recipient"
 }
