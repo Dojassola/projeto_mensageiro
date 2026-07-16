@@ -2,10 +2,16 @@ package com.mensageiro.feature.chat
 
 import android.content.Context
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import com.mensageiro.core.MessagingRuntime
 import com.mensageiro.core.MessagingSnapshot
+import com.mensageiro.core.crypto.MessageCursor
 import com.mensageiro.core.crypto.StoredAttachment
 import com.mensageiro.core.crypto.StoredMessage
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -15,32 +21,36 @@ internal data class ChatUiState(
     val snapshot: MessagingSnapshot,
     val replyToId: String? = null,
     val editingId: String? = null,
-    val message: String = ""
+    val message: String = "",
+    val loadingOlder: Boolean = false,
+    val hasOlderMessages: Boolean = false
 )
 
 internal class ChatViewModel(
     context: Context,
     private val peerId: String
 ) : ViewModel() {
-    private val app = context.applicationContext
-    private val mutableState = MutableStateFlow(ChatUiState(MessagingRuntime.snapshot(peerId)))
+    private val mutableState = MutableStateFlow(ChatUiState(MessagingRuntime.snapshot(peerId, includeMessages = false)))
     private val listener = MessagingRuntime.Listener { refresh() }
     private var attached = false
+    @Volatile private var initialLoaded = false
+    private var refreshJob: Job? = null
 
     val state: StateFlow<ChatUiState> = mutableState.asStateFlow()
 
     fun attach() {
         if (attached) return
         attached = true
-        MessagingRuntime.selectContact(app, peerId)
+        initialLoaded = false
         MessagingRuntime.addListener(listener)
         MessagingRuntime.setConversationVisible(peerId, true)
-        refresh()
+        loadInitial()
     }
 
     fun detach() {
         if (!attached) return
         attached = false
+        refreshJob?.cancel()
         MessagingRuntime.setConversationVisible(peerId, false)
         MessagingRuntime.removeListener(listener)
     }
@@ -48,6 +58,29 @@ internal class ChatViewModel(
     fun markRead() = MessagingRuntime.markRead(peerId)
 
     fun reconnect() = MessagingRuntime.reconnect(peerId)
+
+    fun loadOlder() {
+        val current = mutableState.value
+        val oldest = current.snapshot.messages.firstOrNull() ?: return
+        if (current.loadingOlder || !current.hasOlderMessages) return
+        mutableState.update { it.copy(loadingOlder = true) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val page = MessagingRuntime.messagePage(
+                peerId,
+                MessageCursor(oldest.timestamp, oldest.id),
+                PageSize + 1
+            )
+            val older = page.take(PageSize).asReversed()
+            mutableState.update { state ->
+                val messages = (older + state.snapshot.messages).distinctBy { it.id }
+                state.copy(
+                    snapshot = state.snapshot.copy(messages = messages),
+                    loadingOlder = false,
+                    hasOlderMessages = page.size > PageSize
+                )
+            }
+        }
+    }
 
     fun startReply(message: StoredMessage) {
         if (message.contactPeerId != peerId || message.system) return
@@ -67,8 +100,14 @@ internal class ChatViewModel(
     fun submit(text: String): Boolean {
         if (text.isBlank()) return false
         val current = mutableState.value
-        val error = current.editingId?.let { MessagingRuntime.editMessage(peerId, it, text) }.orEmpty()
-        if (current.editingId == null) MessagingRuntime.send(peerId, text, current.replyToId)
+        if (current.editingId == null) {
+            mutableState.update { it.copy(replyToId = null, message = "") }
+            viewModelScope.launch(Dispatchers.IO) {
+                MessagingRuntime.send(peerId, text, current.replyToId)
+            }
+            return true
+        }
+        val error = MessagingRuntime.editMessage(peerId, current.editingId, text)
         mutableState.update {
             if (error.isBlank()) it.copy(replyToId = null, editingId = null, message = "")
             else it.copy(message = error)
@@ -76,8 +115,11 @@ internal class ChatViewModel(
         return error.isBlank()
     }
 
-    fun sendFile(messageId: String, attachment: StoredAttachment) =
-        MessagingRuntime.sendFile(peerId, messageId, attachment)
+    fun sendFile(messageId: String, attachment: StoredAttachment) {
+        viewModelScope.launch(Dispatchers.IO) {
+            MessagingRuntime.sendFile(peerId, messageId, attachment)
+        }
+    }
 
     fun deleteLocal(messageId: String) {
         MessagingRuntime.deleteMessage(peerId, messageId)
@@ -108,8 +150,40 @@ internal class ChatViewModel(
     }
 
     private fun refresh() {
-        val snapshot = MessagingRuntime.snapshot(peerId)
-        mutableState.update { it.copy(snapshot = snapshot) }
+        if (!attached || !initialLoaded) return
+        val loaded = mutableState.value.snapshot.messages
+        val oldest = loaded.firstOrNull()
+        if (oldest == null) {
+            loadInitial()
+            return
+        }
+        val cursor = MessageCursor(oldest.timestamp, oldest.id)
+        refreshJob?.cancel()
+        refreshJob = viewModelScope.launch(Dispatchers.IO) {
+            val updatedRange = MessagingRuntime.messagesFrom(peerId, cursor)
+            val shell = MessagingRuntime.snapshot(peerId, includeMessages = false)
+            if (!isActive) return@launch
+            mutableState.update { state ->
+                val olderLoadedDuringRefresh = state.snapshot.messages.filter {
+                    it.timestamp < cursor.timestamp || (it.timestamp == cursor.timestamp && it.id < cursor.id)
+                }
+                state.copy(snapshot = shell.copy(messages = olderLoadedDuringRefresh + updatedRange))
+            }
+        }
+    }
+
+    private fun loadInitial() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val page = MessagingRuntime.messagePage(peerId, null, PageSize + 1)
+            val shell = MessagingRuntime.snapshot(peerId, includeMessages = false)
+            initialLoaded = true
+            mutableState.update {
+                it.copy(
+                    snapshot = shell.copy(messages = page.take(PageSize).asReversed()),
+                    hasOlderMessages = page.size > PageSize
+                )
+            }
+        }
     }
 
     private fun clearTarget(messageId: String) {
@@ -123,5 +197,9 @@ internal class ChatViewModel(
 
     override fun onCleared() {
         detach()
+    }
+
+    private companion object {
+        const val PageSize = 50
     }
 }

@@ -37,11 +37,11 @@ internal class MessageDatabase(context: Context) :
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
 
-    fun importLegacy(rows: List<MessageRow>) {
+    fun importLegacy(rows: () -> List<MessageRow>) {
         writableDatabase.beginTransaction()
         try {
             if (!hasMetadata(writableDatabase, LegacyImported)) {
-                rows.forEach { upsert(writableDatabase, it) }
+                rows().forEach { upsert(writableDatabase, it) }
                 writableDatabase.insertOrThrow(
                     "metadata",
                     null,
@@ -84,6 +84,13 @@ internal class MessageDatabase(context: Context) :
             args
         )
     }
+
+    fun from(peerId: String, timestamp: Long, id: String): List<MessageRow> = query(
+        "SELECT message_id, peer_id, timestamp, payload FROM messages " +
+            "WHERE peer_id = ? AND (timestamp > ? OR (timestamp = ? AND message_id >= ?)) " +
+            "ORDER BY timestamp, message_id",
+        arrayOf(peerId, timestamp.toString(), timestamp.toString(), id)
+    )
 
     fun upsert(row: MessageRow) = upsert(writableDatabase, row)
 

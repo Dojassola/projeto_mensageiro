@@ -180,6 +180,8 @@ internal fun ConversationScreen(
     val replyToId = uiState.replyToId
     val editingId = uiState.editingId
     val fileStatus = uiState.message
+    val loadingOlder = uiState.loadingOlder
+    val hasOlderMessages = uiState.hasOlderMessages
     val scope = rememberCoroutineScope()
     val composerState = rememberSaveable(contact.peerId, saver = MessageComposerState.Saver) {
         MessageComposerState()
@@ -189,7 +191,6 @@ internal fun ConversationScreen(
     val composerFocus = remember(contact.peerId) { FocusRequester() }
     val listState = rememberLazyListState()
     var followLatest by remember(contact.peerId) { mutableStateOf(true) }
-    var sentScrollRequest by remember(contact.peerId) { mutableStateOf(0) }
     var showCallScreen by remember(contact.peerId) { mutableStateOf(false) }
     var pendingCallAction by remember(contact.peerId) { mutableStateOf<(() -> Unit)?>(null) }
     val requestCallPermissions = rememberLauncherForActivityResult(
@@ -245,7 +246,7 @@ internal fun ConversationScreen(
     fun startEdit(message: StoredMessage) {
         chatViewModel.startEditing(message)?.let { composerState.text = it }
     }
-    LaunchedEffect(messages, contact.peerId) {
+    LaunchedEffect(messages.firstOrNull()?.id, contact.peerId) {
         chatViewModel.markRead()
     }
     LaunchedEffect(replyToId, editingId) {
@@ -257,13 +258,19 @@ internal fun ConversationScreen(
     LaunchedEffect(snapshot.callState) {
         if (snapshot.callState == CallState.RINGING) showCallScreen = true
     }
-    LaunchedEffect(sentScrollRequest) {
-        if (sentScrollRequest > 0 && messages.isNotEmpty()) listState.scrollToItem(0)
-    }
     LaunchedEffect(listState, contact.peerId) {
         snapshotFlow {
             messages.isEmpty() || listState.layoutInfo.visibleItemsInfo.any { it.index == 0 }
         }.collect { followLatest = it }
+    }
+    LaunchedEffect(listState, messages.size, hasOlderMessages) {
+        if (!hasOlderMessages) return@LaunchedEffect
+        snapshotFlow {
+            val lastVisible = listState.layoutInfo.visibleItemsInfo.maxOfOrNull { it.index } ?: 0
+            messages.isNotEmpty() && lastVisible >= messages.lastIndex - 5
+        }.collect { nearOldest ->
+            if (nearOldest) chatViewModel.loadOlder()
+        }
     }
     LaunchedEffect(contact.peerId) {
         while (true) {
@@ -539,6 +546,16 @@ internal fun ConversationScreen(
                         }
                     }
                 }
+                if (loadingOlder) {
+                    item(key = "loading-older") {
+                        Text(
+                            "Carregando mensagens...",
+                            modifier = Modifier.fillMaxWidth().padding(12.dp),
+                            textAlign = TextAlign.Center,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
             }
             if (!followLatest && messages.isNotEmpty()) {
                 TextButton(
@@ -576,7 +593,6 @@ internal fun ConversationScreen(
                 chatViewModel.submit(text).also { sent ->
                     if (sent && sendingNew) {
                         followLatest = true
-                        sentScrollRequest++
                     }
                 }
             }

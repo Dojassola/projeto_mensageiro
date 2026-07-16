@@ -13,7 +13,10 @@ import android.os.IBinder
 import com.mensageiro.MainActivity
 
 class MessagingService : Service() {
+    private var lastServiceStatus: String? = null
     private val listener = MessagingRuntime.Listener { snapshot ->
+        if (snapshot.serviceStatus == lastServiceStatus) return@Listener
+        lastServiceStatus = snapshot.serviceStatus
         getSystemService(NotificationManager::class.java).notify(
             ServiceNotificationId,
             Notifications.service(this, snapshot.serviceStatus)

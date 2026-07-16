@@ -28,6 +28,10 @@ import java.text.DateFormat
 import java.util.Date
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArraySet
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 data class MessagingSnapshot(
     val contact: VerifiedContact?,
@@ -64,6 +68,7 @@ object MessagingRuntime {
     }
 
     private val listeners = CopyOnWriteArraySet<Listener>()
+    private val storageScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val sessions = LinkedHashMap<String, Session>()
     private var context: Context? = null
     private var identityStore: IdentityStore? = null
@@ -112,7 +117,7 @@ object MessagingRuntime {
 
     @Synchronized
     fun selectContact(source: Context, peerId: String) {
-        start(source)
+        if (peerId !in sessions) start(source)
         if (peerId !in sessions) return
         selectedPeerId = peerId
         source.getSharedPreferences("runtime", Context.MODE_PRIVATE)
@@ -176,7 +181,6 @@ object MessagingRuntime {
     fun setConversationVisible(peerId: String?, visible: Boolean) {
         if (visible) conversationPeerId = peerId
         else if (conversationPeerId == peerId) conversationPeerId = null
-        if (visible) markRead(peerId)
     }
 
     @Synchronized
@@ -271,8 +275,13 @@ object MessagingRuntime {
         dispatch()
     }
 
-    @Synchronized
     fun markRead(peerId: String? = conversationPeerId) {
+        val targetPeerId = peerId ?: return
+        storageScope.launch { markReadNow(targetPeerId) }
+    }
+
+    @Synchronized
+    private fun markReadNow(peerId: String) {
         if (!appVisible || conversationPeerId != peerId) return
         val session = sessions[peerId] ?: return
         val store = messageStore ?: return
@@ -298,7 +307,7 @@ object MessagingRuntime {
 
     fun addListener(listener: Listener) {
         listeners += listener
-        listener.onUpdate(snapshot())
+        listener.onUpdate(snapshot(includeMessages = false))
     }
 
     fun removeListener(listener: Listener) {
@@ -306,7 +315,7 @@ object MessagingRuntime {
     }
 
     @Synchronized
-    fun snapshot(peerId: String? = selectedPeerId): MessagingSnapshot {
+    fun snapshot(peerId: String? = selectedPeerId, includeMessages: Boolean = true): MessagingSnapshot {
         val session = sessions[peerId]
         val store = messageStore
         val connectedCount = sessions.values.count { it.connected }
@@ -315,7 +324,7 @@ object MessagingRuntime {
             session?.status ?: if (sessions.isEmpty()) "Adicione um contato" else "Sem contato selecionado",
             session?.connected == true,
             session?.connected == true && session.remoteActive,
-            if (session != null && store != null) store.forContact(session.contact.peerId) else emptyList(),
+            if (includeMessages && session != null && store != null) store.forContact(session.contact.peerId) else emptyList(),
             if (session != null && store != null) store.lastOnline(session.contact.peerId) else 0,
             if (sessions.isEmpty()) "Nenhum contato" else "$connectedCount de ${sessions.size} conectados",
             session?.callManager?.state ?: CallState.IDLE,
@@ -324,6 +333,22 @@ object MessagingRuntime {
             session?.callManager?.muted == true,
             session?.callManager?.speakerOn == true
         )
+    }
+
+    fun messagePage(
+        peerId: String,
+        before: com.mensageiro.core.crypto.MessageCursor?,
+        limit: Int
+    ): List<StoredMessage> {
+        val store = synchronized(this) { messageStore } ?: return emptyList()
+        return store.page(peerId, before, limit)
+    }
+
+    fun messagesFrom(peerId: String, cursor: com.mensageiro.core.crypto.MessageCursor): List<StoredMessage> {
+        val store = synchronized(this) { messageStore } ?: return emptyList()
+        return store.forContact(peerId).filter {
+            it.timestamp > cursor.timestamp || (it.timestamp == cursor.timestamp && it.id >= cursor.id)
+        }
     }
 
     private fun syncSessions(contacts: List<VerifiedContact>, identity: com.mensageiro.core.crypto.LocalIdentity) {
@@ -654,7 +679,7 @@ object MessagingRuntime {
     }
 
     private fun dispatch() {
-        val value = snapshot()
+        val value = snapshot(includeMessages = false)
         listeners.forEach { it.onUpdate(value) }
     }
 

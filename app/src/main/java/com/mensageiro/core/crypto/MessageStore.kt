@@ -45,7 +45,7 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
     private val deletedPrefs = this.context.getSharedPreferences("deleted_messages", Context.MODE_PRIVATE)
     private val remoteDeletionPrefs = this.context.getSharedPreferences("remote_deletions", Context.MODE_PRIVATE)
     private val database = MessageDatabase(this.context).also { database ->
-        database.importLegacy(
+        database.importLegacy {
             prefs.all.mapNotNull { (id, value) ->
                 runCatching {
                     val payload = value as String
@@ -53,7 +53,7 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
                     MessageRow(id, message.contactPeerId, message.timestamp, payload)
                 }.getOrNull()
             }
-        )
+        }
     }
     private val messages = LinkedHashMap<String, StoredMessage>().apply {
         database.loadAll().forEach { row ->
@@ -69,9 +69,13 @@ class MessageStore(context: Context, private val identityStore: IdentityStore) {
     fun forContact(peerId: String): List<StoredMessage> =
         conversations[peerId].orEmpty()
 
-    @Synchronized
     fun page(peerId: String, before: MessageCursor? = null, limit: Int = 50): List<StoredMessage> =
         database.page(peerId, before?.timestamp, before?.id, limit).mapNotNull { row ->
+            runCatching { decode(row.id, identityStore.unprotect(row.payload)) }.getOrNull()
+        }
+
+    fun from(peerId: String, cursor: MessageCursor): List<StoredMessage> =
+        database.from(peerId, cursor.timestamp, cursor.id).mapNotNull { row ->
             runCatching { decode(row.id, identityStore.unprotect(row.payload)) }.getOrNull()
         }
 
